@@ -1,0 +1,35 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+@layer components {
+  .select {
+    @apply w-full bg-ink-700 border border-ink-600 rounded px-2 py-2 text-sm;
+  }
+}
+
+body {
+  @apply bg-ink-900 text-slate-100 antialiased;
+}
+
+/* 规则页 markdown 渲染样式 */
+.markdown-body h1 { @apply text-2xl font-bold mt-6 mb-3 text-gold; }
+.markdown-body h2 { @apply text-xl font-bold mt-6 mb-2 text-slate-100 border-b border-ink-600 pb-1; }
+.markdown-body h3 { @apply text-lg font-semibold mt-4 mb-2 text-slate-200; }
+.markdown-body p { @apply my-2 leading-relaxed text-slate-300; }
+.markdown-body ul { @apply list-disc pl-6 my-2 text-slate-300; }
+.markdown-body ol { @apply list-decimal pl-6 my-2 text-slate-300; }
+.markdown-body li { @apply my-1; }
+.markdown-body code { @apply bg-ink-700 px-1 py-0.5 rounded text-toxic text-sm; }
+.markdown-body pre { @apply bg-ink-800 p-3 rounded my-3 overflow-x-auto text-sm; }
+.markdown-body pre code { @apply bg-transparent p-0 text-slate-200; }
+.markdown-body table { @apply w-full my-3 border-collapse text-sm; }
+.markdown-body th { @apply border border-ink-600 px-2 py-1 bg-ink-700 text-left; }
+.markdown-body td { @apply border border-ink-600 px-2 py-1; }
+.markdown-body blockquote { @apply border-l-4 border-ink-500 pl-3 my-3 text-slate-400; }
+.markdown-body hr { @apply my-4 border-ink-600; }
+.markdown-body a { @apply text-blue-400 underline; }
