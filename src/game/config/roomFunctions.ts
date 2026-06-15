@@ -35,3 +35,15 @@ export const ROOM_FUNCTIONS: RoomFunctionConfig[] = [
 export function getRoomFunction(roomId: string): RoomFunctionConfig | undefined {
   return ROOM_FUNCTIONS.find((f) => f.roomId === roomId);
 }
+
+/** 房间数字抽卡上限；无抽卡或特殊（停机坪）返回 0。 */
+export function getDrawLimit(roomId: string): number {
+  const fn = getRoomFunction(roomId);
+  if (!fn || typeof fn.drawLimit !== "number") return 0;
+  return fn.drawLimit;
+}
+
+/** 该房间是否可常规抽卡（库存型房间，排除停机坪特殊与无库存功能房间） */
+export function isDrawRoom(roomId: string): boolean {
+  return getDrawLimit(roomId) > 0;
+}

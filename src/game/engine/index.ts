@@ -4,14 +4,17 @@ export * from "./createGame";
 export * from "./lobby";
 export * from "./startGame";
 export * from "./submitAction";
+export * from "./draw";
 export * from "./advancePhase";
-export * from "./resolveRound";
-export * from "./resolveGasVote";
-export * from "./resolveCombat";
-export * from "./resolveShadow";
-export * from "./resolveFoodAndWater";
-export * from "./resolveDeath";
-export * from "./resolveRoomEffects";
-export * from "./resolveRocket";
-export * from "./ranking";
 export * from "./host";
+
+// 结算引擎（含排名）
+export * from "../resolution";
+
+// 库存 / 毒气工具
+export * from "../inventory";
+export * from "../gas";
+
+// 移动 / 地图
+export * from "../utils/movement";
+export * from "../config/mapGraph";

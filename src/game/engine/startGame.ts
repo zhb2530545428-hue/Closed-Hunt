@@ -1,9 +1,12 @@
 // 开始游戏。来源：开发指令 8.1。
 
-import type { GameRoom, Player } from "../types";
+import type { GameRoom, Inventory, Player } from "../types";
 import { appendLog, nowISO } from "./helpers";
 import { MAX_SEATS } from "./createGame";
 import { isGeneValid } from "./lobby";
+import { ROOMS } from "../config/rooms";
+import { initialStockFor } from "../config/initialStocks";
+import { addAirdropForRound } from "./draw";
 
 /** 已就座（有昵称）的玩家 */
 function seatedPlayers(room: GameRoom): Player[] {
@@ -53,19 +56,30 @@ export function startGame(room: GameRoom): GameRoom {
       // location 已是出生房间
       status: "alive",
       shadowDrainCount: 0,
+      lastRoundHp: 10,
       orderCard: null,
       submittedAction: null,
     };
   });
 
+  // 初始化房间库存（规则 14.1 / 开发指令 3.2.3）
+  const roomInventories: Record<string, Inventory> = {};
+  for (const r of ROOMS) {
+    roomInventories[r.id] = initialStockFor(r.id);
+  }
+
   let next: GameRoom = {
     ...room,
     players,
+    roomInventories,
+    consumedPile: {},
+    airdrops: [],
     status: "FREE",
     currentRound: 1,
     currentPhase: "FREE",
     updatedAt: nowISO(),
   };
+  next = addAirdropForRound(next, 1);
   next = appendLog(next, "游戏开始。第 1 轮自由阶段开始。");
   return next;
 }

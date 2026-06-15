@@ -7,3 +7,4 @@ export * from "./items";
 export * from "./rounds";
 export * from "./phases";
 export * from "./roomFunctions";
+export * from "./initialStocks";
