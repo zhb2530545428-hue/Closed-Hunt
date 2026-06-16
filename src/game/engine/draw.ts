@@ -2,12 +2,27 @@
 // 抽卡在行动阶段即时进行：从目标房间库存抽取，立即更新房间库存与玩家手牌。
 
 import type { GameRoom, Player } from "../types";
-import { appendLog, nowISO, shuffle } from "./helpers";
+import { appendLog, appendPrivateLog, nowISO, shuffle } from "./helpers";
 import { invAdd, invRemove, invToList } from "../inventory";
 import { getDrawLimit } from "../config/roomFunctions";
 import { isJunkItem, getItemName } from "../config/items";
 import { getRoomLabel } from "../config/rooms";
 import { airdropItemsByRound } from "../config/rounds";
+
+/** 把本次抽到的道具写入玩家本轮行动的私密抽卡结果（即时私密展示，§3）。 */
+function recordDraw(player: Player, roomId: string, drawn: string[]): Player {
+  const a = player.submittedAction;
+  if (!a) return player;
+  return {
+    ...player,
+    submittedAction: {
+      ...a,
+      hasDrawnFromRoom: true,
+      drawnRoomId: roomId,
+      privateDrawResult: [...(a.privateDrawResult ?? []), ...drawn],
+    },
+  };
+}
 
 function replacePlayer(room: GameRoom, player: Player): GameRoom {
   return {
@@ -32,7 +47,12 @@ function ensureCanDraw(room: GameRoom, roomId: string, playerId: string): Player
   const player = room.players.find((p) => p.id === playerId);
   if (!player) throw new Error("玩家不存在。");
   if (player.status === "shadow") throw new Error("暗影不能抽取道具卡。");
-  if (player.submittedAction?.toRoom !== roomId) throw new Error("只能在你本轮的目标房间抽卡。");
+  if (player.endedAction) throw new Error("你已结束本轮行动，无法再抽卡。");
+  if (!player.submittedAction || player.submittedAction.round !== room.currentRound) {
+    throw new Error("请先提交本轮移动再使用房间功能。");
+  }
+  if (player.submittedAction.toRoom !== roomId) throw new Error("只能在你本轮的目标房间抽卡。");
+  if (room.closedRooms?.includes(roomId)) throw new Error("该房间功能被黑客关闭，本轮无法抽取道具。");
   return player;
 }
 
@@ -47,6 +67,9 @@ export function drawItemsFromRoom(
   count: number
 ): GameRoom {
   const player = ensureCanDraw(room, roomId, playerId);
+  if (player.submittedAction?.hasDrawnFromRoom) {
+    throw new Error("每次行动只能抽一次卡，本轮已抽过。");
+  }
   const limit = getDrawLimit(roomId);
   if (limit <= 0) throw new Error("该房间不可常规抽卡。");
 
@@ -55,13 +78,18 @@ export function drawItemsFromRoom(
   const { drawn, remaining } = drawRandom(inv, want);
   if (drawn.length === 0) throw new Error("房间库存已空。");
 
-  const updatedPlayer: Player = { ...player, inventory: [...player.inventory, ...drawn] };
+  const updatedPlayer: Player = recordDraw(
+    { ...player, inventory: [...player.inventory, ...drawn] },
+    roomId,
+    drawn
+  );
   let next = replacePlayer(room, updatedPlayer);
   next = {
     ...next,
     roomInventories: { ...next.roomInventories, [roomId]: remaining },
   };
-  next = appendLog(next, `${player.name} 在 ${getRoomLabel(roomId)} 抽取了 ${drawn.length} 张道具。`);
+  // §3 / §13：抽卡结果为私密信息，仅本人面板可见，不进公共日志。
+  next = appendPrivateLog(next, playerId, `你在 ${getRoomLabel(roomId)} 抽到：${drawn.map(getItemName).join("、")}。`);
   return next;
 }
 
@@ -73,6 +101,9 @@ export function drawItemsFromRoom(
 export function drawFromTrash(room: GameRoom, playerId: string, count = 5): GameRoom {
   const roomId = "B503";
   const player = ensureCanDraw(room, roomId, playerId);
+  if (player.submittedAction?.hasDrawnFromRoom) {
+    throw new Error("每次行动只能抽一次卡，本轮已抽过。");
+  }
   const inv = room.roomInventories[roomId] ?? {};
   const want = Math.min(count, getDrawLimit(roomId));
   const { drawn, remaining } = drawRandom(inv, want);
@@ -87,7 +118,11 @@ export function drawFromTrash(room: GameRoom, playerId: string, count = 5): Game
   for (const id of returnedNonJunk) roomInv = invAdd(roomInv, id, 1);
 
   const kept = [...junk, ...keptNonJunk];
-  const updatedPlayer: Player = { ...player, inventory: [...player.inventory, ...kept] };
+  const updatedPlayer: Player = recordDraw(
+    { ...player, inventory: [...player.inventory, ...kept] },
+    roomId,
+    kept
+  );
   let next = replacePlayer(room, updatedPlayer);
   next = { ...next, roomInventories: { ...next.roomInventories, [roomId]: roomInv } };
 
@@ -95,9 +130,10 @@ export function drawFromTrash(room: GameRoom, playerId: string, count = 5): Game
     returnedNonJunk.length > 0
       ? `（非垃圾最多保留 2 张，${returnedNonJunk.map(getItemName).join("、")} 退回库存）`
       : "";
-  next = appendLog(
+  next = appendPrivateLog(
     next,
-    `${player.name} 在 ${getRoomLabel(roomId)} 抽取：保留 ${kept.length} 张${desc}。`
+    playerId,
+    `你在 ${getRoomLabel(roomId)} 抽到：${kept.map(getItemName).join("、") || "无"}${desc}。`
   );
   return next;
 }
@@ -133,9 +169,10 @@ export function useGoldDraw(
     roomInventories: { ...next.roomInventories, [roomId]: invRemove(inv, pickItemId, 1).inv },
     consumedPile: invAdd(next.consumedPile, "gold", 1),
   };
-  next = appendLog(
+  next = appendPrivateLog(
     next,
-    `${player.name} 在 ${getRoomLabel(roomId)} 使用金条额外获得 ${getItemName(pickItemId)}。`
+    playerId,
+    `你在 ${getRoomLabel(roomId)} 使用金条额外获得 ${getItemName(pickItemId)}。`
   );
   return next;
 }
@@ -153,9 +190,10 @@ export function claimAirdrop(room: GameRoom, playerId: string, round: number): G
     ...next,
     airdrops: next.airdrops.map((a) => (a.round === round ? { ...a, claimed: true } : a)),
   };
-  next = appendLog(
+  next = appendPrivateLog(
     next,
-    `${player.name} 领取了第 ${round} 轮空投（${items.map(getItemName).join("、")}）。`
+    playerId,
+    `你领取了第 ${round} 轮空投（${items.map(getItemName).join("、")}）。`
   );
   return next;
 }
@@ -180,9 +218,10 @@ export function discardItems(room: GameRoom, playerId: string, itemIds: string[]
   const updatedPlayer: Player = { ...player, inventory: newHand };
   let next = replacePlayer(room, updatedPlayer);
   next = { ...next, roomInventories: { ...next.roomInventories, [roomId]: roomInv } };
-  next = appendLog(
+  next = appendPrivateLog(
     next,
-    `${player.name} 在 ${getRoomLabel(roomId)} 丢弃了 ${itemIds.length} 张道具。`
+    playerId,
+    `你在 ${getRoomLabel(roomId)} 丢弃了 ${itemIds.length} 张道具。`
   );
   return next;
 }

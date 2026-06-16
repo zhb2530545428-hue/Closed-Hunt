@@ -11,6 +11,16 @@ import { isRoomGassed } from "../src/game/gas";
 import { getInventoryWeight, getCarryLimit, isOverweight } from "../src/game/inventory";
 import { validateMapGraph } from "../src/game/config/mapGraph";
 import { getReachableRooms, validateMove, type MoveContext } from "../src/game/utils/movement";
+import { applyRoleSetup, roleHasGun, applyDeclaredSkill } from "../src/game/engine/roleEffects";
+import { createTrade, respondTrade } from "../src/game/engine/trade";
+import { computeRanking, applyFinalGoldConversion } from "../src/game/resolution/ranking";
+import { resolveRoleAssignments } from "../src/game/engine/lobby";
+import { currentTurnPlayerId, endTurn } from "../src/game/engine/advancePhase";
+import { submitAction } from "../src/game/engine/submitAction";
+import { drawItemsFromRoom } from "../src/game/engine/draw";
+import { DEFAULT_MAP_CONNECTIONS, makeConnectionId } from "../src/game/config/mapConnections";
+import { DEFAULT_MAP_LAYOUT } from "../src/game/config/mapLayout";
+import { shortestPath, validateMapData } from "../src/game/utils/mapEditor";
 
 let passed = 0;
 let failed = 0;
@@ -30,6 +40,7 @@ function makePlayer(p: Partial<Player> & { id: string }): Player {
     id: p.id,
     name: p.name ?? p.id,
     seatIndex: p.seatIndex ?? 0,
+    preferredRoleId: p.preferredRoleId ?? p.roleId ?? null,
     roleId: p.roleId ?? null,
     hp: p.hp ?? 10,
     maxHp: p.maxHp ?? 10,
@@ -42,6 +53,8 @@ function makePlayer(p: Partial<Player> & { id: string }): Player {
     inventory: p.inventory ?? [],
     orderCard: p.orderCard ?? null,
     shadowDrainCount: p.shadowDrainCount ?? 0,
+    lastRoundHp: p.lastRoundHp,
+    endedAction: p.endedAction,
     isReady: true,
     submittedAction: p.submittedAction ?? null,
   };
@@ -50,8 +63,8 @@ function makePlayer(p: Partial<Player> & { id: string }): Player {
 function makeRoom(players: Player[], round = 1, gasFloors: string[] = []): GameRoom {
   return {
     id: "r", roomCode: "TEST", status: "RESOLUTION", currentRound: round, currentPhase: "RESOLUTION",
-    hostPlayerId: players[0]?.id ?? "h", players, gasFloors, clearedGasRooms: [],
-    roomInventories: {}, consumedPile: {}, airdrops: [], resolutionPreview: null,
+    hostPlayerId: players[0]?.id ?? "h", players, gasFloors, clearedGasRooms: [], closedRooms: [],
+    roomInventories: {}, consumedPile: {}, airdrops: [], trades: [], resolutionPreview: null,
     publicLogs: [], devMode: true, createdAt: "", updatedAt: "",
   };
 }
@@ -210,10 +223,12 @@ const ids = (from: string, speed: number, extra?: Partial<MoveContext>) =>
 test("mapGraph 校验通过（房间齐全、邻接双向）", () => {
   assert.deepEqual(validateMapGraph(), []);
 });
-test("B103 速度 1 可达相邻房间", () => {
+test("B103 速度 1 可达相邻房间（校准后：仅 B102/B104 相邻）", () => {
   const r = ids("B103", 1);
-  for (const x of ["B102", "B104", "B203", "102"]) assert.ok(r.includes(x), `应可达 ${x}`);
+  for (const x of ["B102", "B104"]) assert.ok(r.includes(x), `应可达 ${x}`);
   assert.ok(!r.includes("B103"), "不含起点");
+  // 校准后 102 经 B104 需 2 步、B203 经 B204 更远，速度 1 不可达
+  assert.ok(!r.includes("102"), "102 已非 B103 直接相邻");
 });
 test("超出速度不可达，提速后可达", () => {
   assert.equal(validateMove(ctx("B103", 1), "B101").ok, false);
@@ -224,7 +239,8 @@ test("不能原地停留", () => {
   assert.equal(v.ok, false);
 });
 test("经过 102 激光室触发提示（存活）", () => {
-  const v = validateMove(ctx("B103", 1), "102");
+  // 校准后 B103→102 走 B103→B104→102（楼梯）共 2 步
+  const v = validateMove(ctx("B103", 2), "102");
   assert.equal(v.ok, true);
   assert.equal(v.passesLaser, true);
 });
@@ -255,6 +271,436 @@ test("绳索使存活玩家可竖向上下楼（不经楼梯）", () => {
   const withRope = ids("B102", 1, { hasRope: true });
   assert.ok(!noRope.includes("B202"), "无绳索不直达 B202");
   assert.ok(withRope.includes("B202"), "持绳索可直达 B202");
+});
+
+// ---------- v1.0 职业技能 ----------
+console.log("职业技能：");
+
+test("富豪开局金条：金库 -2 大仓库 -1，本人 +3", () => {
+  const tycoon = makePlayer({ id: "t", roleId: "tycoon", name: "富豪" });
+  const room = makeRoom([tycoon], 1);
+  room.roomInventories = { B206: { gold: 4 }, B501: { gold: 1 } };
+  const { room: r2 } = applyRoleSetup(room);
+  const p = r2.players[0];
+  assert.equal(p.inventory.filter((i) => i === "gold").length, 3);
+  assert.equal(r2.roomInventories.B206.gold, 2);
+  assert.equal(r2.roomInventories.B501.gold ?? 0, 0);
+});
+
+test("驯兽师开局武力/负重 +1", () => {
+  const bm = makePlayer({ id: "b", roleId: "beastmaster", force: 3, load: 3 });
+  const { room: r2 } = applyRoleSetup(makeRoom([bm], 1));
+  assert.equal(r2.players[0].force, 4);
+  assert.equal(r2.players[0].load, 4);
+});
+
+test("雇佣兵持刀视为持枪，普通玩家持刀不算枪", () => {
+  assert.equal(roleHasGun(makePlayer({ id: "m", roleId: "mercenary", inventory: ["knife"] })), true);
+  assert.equal(roleHasGun(makePlayer({ id: "n", inventory: ["knife"] })), false);
+  assert.equal(roleHasGun(makePlayer({ id: "g", inventory: ["pistol"] })), true);
+});
+
+test("暗影使者免疫吸血并因吸血回复生命", () => {
+  const envoy = makePlayer({ id: "e", roleId: "shadow_envoy", hp: 5, submittedAction: { round: 1, fromRoom: null, toRoom: "103", gasVoteFloor: "B1", submittedAt: "" } });
+  const victim = makePlayer({ id: "v", hp: 5, submittedAction: { round: 1, fromRoom: null, toRoom: "103", gasVoteFloor: "B1", submittedAt: "" } });
+  const shadow = makePlayer({ id: "s", status: "shadow", submittedAction: { round: 1, fromRoom: null, toRoom: "103", gasVoteFloor: null, submittedAt: "" } });
+  const r = buildResolutionPreview(makeRoom([envoy, victim, shadow], 1));
+  assert.equal(r.nextRoom.players.find((p) => p.id === "v")!.hp, 4); // 被吸 1
+  assert.equal(r.nextRoom.players.find((p) => p.id === "e")!.hp, 6); // 免疫且回复 1
+});
+
+test("病毒携带者：第 1 轮仅标记，第 2 轮扣 N", () => {
+  const mk = (round: number) => {
+    const c = makePlayer({ id: "c", roleId: "carrier", submittedAction: { round, fromRoom: null, toRoom: "103", gasVoteFloor: "B1", submittedAt: "" } });
+    const x = makePlayer({ id: "x", submittedAction: { round, fromRoom: null, toRoom: "103", gasVoteFloor: "B1", submittedAt: "" } });
+    const y = makePlayer({ id: "y", submittedAction: { round, fromRoom: null, toRoom: "103", gasVoteFloor: "B1", submittedAt: "" } });
+    return buildResolutionPreview(makeRoom([c, x, y], round));
+  };
+  const r1 = mk(1);
+  assert.equal(r1.nextRoom.players.find((p) => p.id === "x")!.hp, 10); // 初始轮无伤害
+  assert.equal(r1.nextRoom.players.find((p) => p.id === "x")!.infection, 1);
+  const r2 = mk(2);
+  // 其他存活 2 人 → 各 -2（N=2）；同时第 2 轮还要水粮，但默认未交 → 再 -2。仅验证感染层数与至少受伤。
+  assert.equal(r2.nextRoom.players.find((p) => p.id === "x")!.infection, 1);
+  assert.ok(r2.nextRoom.players.find((p) => p.id === "x")!.hp <= 8);
+});
+
+test("化学家 chemist_plus 使毒气伤害 +2", () => {
+  const chem = makePlayer({ id: "c", roleId: "chemist", submittedAction: { round: 1, fromRoom: null, toRoom: "B302", gasVoteFloor: "B3", roleSkill: { type: "chemist_plus" }, submittedAt: "" } });
+  const room = makeRoom([chem], 1, ["B3"]);
+  const r = buildResolutionPreview(room);
+  assert.equal(r.nextRoom.players[0].hp, 7); // 第 1 轮基础 1 + 2 = 3
+});
+
+test("意见领袖额外票权（N×2+1）压过普通票", () => {
+  const inf = at("inf", "103", { gasVoteFloor: "B1" });
+  inf.roleId = "influencer";
+  const a = at("a", "103", { gasVoteFloor: "B3" });
+  const b = at("b", "103", { gasVoteFloor: "B3" });
+  // 3 人在座：意见领袖权重 = 1 + (3-1)*2 = 5，压过 B3 的 2 票
+  const t = tallyGasVotes([inf, a, b], []);
+  assert.deepEqual(t.newFloors, ["B1"]);
+});
+
+test("催眠师 applyDeclaredSkill 设置强制房间并消耗次数", () => {
+  const hyp = makePlayer({ id: "h", roleId: "hypnotist", location: "B102", submittedAction: { round: 1, fromRoom: null, toRoom: "B102", gasVoteFloor: "B1", roleSkill: { type: "charm", targetPlayerIds: ["v"], targetRoom: "B102" }, submittedAt: "" } });
+  const victim = makePlayer({ id: "v", location: "B103" }); // B103→B102 相邻 1 步
+  const room = makeRoom([hyp, victim], 1);
+  const res = applyDeclaredSkill(room, "h");
+  const t = res.room.players.find((p) => p.id === "v")!;
+  const me = res.room.players.find((p) => p.id === "h")!;
+  assert.equal(t.forcedRoom, "B102");
+  assert.equal(t.charmedDone, true);
+  assert.equal(me.roleUses, 1);
+  assert.equal(me.roleHealPending, 1);
+});
+
+test("慈善家赠予并夺取目标 1 点最高基因", () => {
+  const phil = makePlayer({ id: "p", roleId: "philanthropist", force: 1, inventory: ["pill"], submittedAction: { round: 1, fromRoom: null, toRoom: "103", gasVoteFloor: "B1", roleSkill: { type: "gift", giveItemId: "pill", targetPlayerIds: ["t"] }, submittedAt: "" } });
+  const target = makePlayer({ id: "t", force: 6, speed: 2, load: 2, submittedAction: { round: 1, fromRoom: null, toRoom: "B302", gasVoteFloor: "B1", submittedAt: "" } });
+  const r = buildResolutionPreview(makeRoom([phil, target], 1));
+  const pt = r.nextRoom.players.find((p) => p.id === "t")!;
+  const pp = r.nextRoom.players.find((p) => p.id === "p")!;
+  assert.equal(pt.force, 5);          // 最高基因武力 -1
+  assert.equal(pp.force, 2);          // 慈善家武力 +1
+  assert.equal(pt.giftedDone, true);
+  assert.ok(pt.inventory.includes("pill")); // 收到赠予道具
+});
+
+test("饮品师：果汁不占负重，开局得 B601 两张果汁", () => {
+  const b = makePlayer({ id: "b", roleId: "bartender", name: "饮品师", load: 1, inventory: ["juice", "juice", "water"] });
+  assert.equal(getInventoryWeight(b), 1); // 仅水占重
+  const room = makeRoom([makePlayer({ id: "b2", roleId: "bartender", name: "饮品师" })], 1);
+  room.roomInventories = { B601: { juice: 6 } };
+  const { room: r2 } = applyRoleSetup(room);
+  assert.equal(r2.players[0].inventory.filter((i) => i === "juice").length, 2);
+  assert.equal(r2.roomInventories.B601.juice, 4);
+});
+
+test("旧存档兼容：饮品师持有 wine 仍计为果汁不占负重", () => {
+  const b = makePlayer({ id: "b", roleId: "bartender", load: 1, inventory: ["wine", "water"] });
+  assert.equal(getInventoryWeight(b), 1); // wine 归一化为 juice，饮品师不占重
+});
+
+test("饮品师多瓶果汁分配多个目标（各自骰面）", () => {
+  const b = makePlayer({
+    id: "b", roleId: "bartender", inventory: ["juice", "juice"],
+    submittedAction: {
+      round: 1, fromRoom: null, toRoom: "103", gasVoteFloor: "B1", useItems: ["juice", "juice"],
+      roleSkill: { type: "juice", juiceAssignments: [{ targetPlayerId: "t1", diceFaces: [6] }, { targetPlayerId: "t2", diceFaces: [3] }] },
+      submittedAt: "",
+    },
+  });
+  const t1 = makePlayer({ id: "t1", hp: 5, force: 2, submittedAction: { round: 1, fromRoom: null, toRoom: "B302", gasVoteFloor: "B1", submittedAt: "" } });
+  const t2 = makePlayer({ id: "t2", hp: 5, force: 2, submittedAction: { round: 1, fromRoom: null, toRoom: "B305", gasVoteFloor: "B1", submittedAt: "" } });
+  const r = buildResolutionPreview(makeRoom([b, t1, t2], 1));
+  assert.equal(r.nextRoom.players.find((p) => p.id === "t1")!.hp, 7); // 骰面 6 → +2
+  assert.equal(r.nextRoom.players.find((p) => p.id === "t2")!.force, 3); // 骰面 3 → 武力 +1
+});
+
+test("黑客关闭房间 → 该房间基因库本轮失效", () => {
+  const hacker = makePlayer({ id: "h", roleId: "hacker", submittedAction: { round: 1, fromRoom: null, toRoom: "103", gasVoteFloor: "B1", roleSkill: { type: "hacker_close", targetRoom: "201" }, submittedAt: "" } });
+  const gene = makePlayer({ id: "g", force: 1, speed: 1, load: 1, submittedAction: { round: 1, fromRoom: null, toRoom: "201", gasVoteFloor: "B1", roomAction: "gene", submittedAt: "" } });
+  // 先让黑客技能落地（模拟 submit 时 applyDeclaredSkill），再结算
+  const after = applyDeclaredSkill(makeRoom([hacker, gene], 1), "h").room;
+  assert.ok(after.closedRooms.includes("201"));
+  const r = buildResolutionPreview(after);
+  const pg = r.nextRoom.players.find((p) => p.id === "g")!;
+  assert.equal(pg.force, 1); // 基因库被关闭，未 +1
+});
+
+test("黑客远程基因库三项 +1 且整局限 1 次", () => {
+  const hacker = makePlayer({ id: "h", roleId: "hacker", force: 2, speed: 2, load: 2, submittedAction: { round: 1, fromRoom: null, toRoom: "103", gasVoteFloor: "B1", roleSkill: { type: "hacker_func", funcChoice: "gene" }, submittedAt: "" } });
+  const after = applyDeclaredSkill(makeRoom([hacker], 1), "h").room;
+  const ph = after.players.find((p) => p.id === "h")!;
+  assert.equal(ph.force, 3); assert.equal(ph.speed, 3); assert.equal(ph.load, 3);
+  assert.ok((ph.roleActionsUsed ?? []).includes("gene"));
+  // 再次使用 gene 应抛错
+  ph.submittedAction = { round: 1, fromRoom: null, toRoom: "103", gasVoteFloor: "B1", roleSkill: { type: "hacker_func", funcChoice: "gene" }, submittedAt: "" };
+  assert.throws(() => applyDeclaredSkill(makeRoom([ph], 1), "h"));
+});
+
+test("驯兽师猎犬：5 步内有库存房间抽 1 张，消耗次数", () => {
+  const bm = makePlayer({ id: "bm", roleId: "beastmaster", location: "B103", load: 5, submittedAction: { round: 1, fromRoom: null, toRoom: "B102", gasVoteFloor: "B1", roleSkill: { type: "hound", targetRoom: "B107" }, submittedAt: "" } });
+  const room = makeRoom([bm], 1);
+  room.roomInventories = { B107: { knife: 5 } };
+  const res = applyDeclaredSkill(room, "bm");
+  const p = res.room.players.find((x) => x.id === "bm")!;
+  assert.equal(p.inventory.length, 1);
+  assert.equal(p.inventory[0], "knife");
+  assert.equal(p.roleUses, 1);
+  assert.equal(res.room.roomInventories.B107.knife, 4);
+});
+
+test("驯兽师猎犬：超出 5 步报错", () => {
+  const bm = makePlayer({ id: "bm", roleId: "beastmaster", location: "B603", submittedAction: { round: 1, fromRoom: null, toRoom: "B602", gasVoteFloor: "B1", roleSkill: { type: "hound", targetRoom: "201" }, submittedAt: "" } });
+  const room = makeRoom([bm], 1);
+  room.roomInventories = { "201": { gold: 1 } };
+  assert.throws(() => applyDeclaredSkill(room, "bm"));
+});
+
+// ---------- v1.0 交易 ----------
+console.log("交易系统：");
+
+function freeRoom(players: Player[]): GameRoom {
+  const r = makeRoom(players, 1);
+  r.status = "FREE";
+  r.currentPhase = "FREE";
+  return r;
+}
+
+test("接受交易后道具转移，并对超重方给出提示", () => {
+  const a = makePlayer({ id: "a", name: "A", load: 5, inventory: ["pill", "wine"] });
+  const b = makePlayer({ id: "b", name: "B", load: 1, inventory: [] });
+  let room = createTrade(freeRoom([a, b]), "a", { toPlayerId: "b", offerItems: ["pill"] });
+  const tradeId = room.trades[0].id;
+  room = respondTrade(room, tradeId, true);
+  const pa = room.players.find((p) => p.id === "a")!;
+  const pb = room.players.find((p) => p.id === "b")!;
+  assert.ok(!pa.inventory.includes("pill"));
+  assert.ok(pb.inventory.includes("pill"));
+  assert.equal(room.trades[0].status, "accepted");
+});
+
+test("拒绝交易不转移物品", () => {
+  const a = makePlayer({ id: "a", name: "A", inventory: ["pill"] });
+  const b = makePlayer({ id: "b", name: "B", inventory: [] });
+  let room = createTrade(freeRoom([a, b]), "a", { toPlayerId: "b", offerItems: ["pill"] });
+  room = respondTrade(room, room.trades[0].id, false);
+  assert.equal(room.players.find((p) => p.id === "a")!.inventory.length, 1);
+  assert.equal(room.trades[0].status, "rejected");
+});
+
+test("非自由阶段不能交易", () => {
+  const a = makePlayer({ id: "a", name: "A", inventory: ["pill"] });
+  const b = makePlayer({ id: "b", name: "B" });
+  assert.throws(() => createTrade(makeRoom([a, b], 1), "a", { toPlayerId: "b", offerItems: ["pill"] }));
+});
+
+test("顺位卡交换", () => {
+  const a = makePlayer({ id: "a", name: "A", orderCard: 1 });
+  const b = makePlayer({ id: "b", name: "B", orderCard: 5 });
+  let room = createTrade(freeRoom([a, b]), "a", { toPlayerId: "b", offerOrderCard: true, requestOrderCard: true });
+  room = respondTrade(room, room.trades[0].id, true);
+  assert.equal(room.players.find((p) => p.id === "a")!.orderCard, 5);
+  assert.equal(room.players.find((p) => p.id === "b")!.orderCard, 1);
+});
+
+// ---------- v1.0 终局排名 ----------
+console.log("终局排名：");
+
+test("金条兑换生命不超过上限", () => {
+  const a = makePlayer({ id: "a", hp: 7, inventory: ["gold", "gold"] });
+  const b = makePlayer({ id: "b", hp: 9, inventory: ["gold", "gold", "gold"] });
+  const { players } = applyFinalGoldConversion([a, b]);
+  assert.equal(players.find((p) => p.id === "a")!.hp, 9);
+  assert.equal(players.find((p) => p.id === "b")!.hp, 10); // 封顶
+});
+
+test("排名：存活优先 → 生命 → 武力；金魔方积分 9..1", () => {
+  const ps = [
+    makePlayer({ id: "a", name: "A", hp: 8, force: 3, status: "alive" }),
+    makePlayer({ id: "b", name: "B", hp: 8, force: 5, status: "alive" }),
+    makePlayer({ id: "c", name: "C", hp: 0, force: 9, status: "shadow" }),
+  ];
+  const rank = computeRanking(makeRoom(ps, 6));
+  const byId = Object.fromEntries(rank.map((r) => [r.playerId, r]));
+  assert.equal(byId.b.rank, 1); // 生命同 8，武力高者(B)靠前
+  assert.equal(byId.a.rank, 2);
+  assert.equal(byId.c.rank, 3); // 暗影垫底
+  assert.equal(byId.b.points, 3); // 3 人局：第 1 名 = 人数 3
+});
+
+test("全员暗影按生前上一轮生命排名", () => {
+  const ps = [
+    makePlayer({ id: "a", name: "A", status: "shadow", lastRoundHp: 2, force: 9 }),
+    makePlayer({ id: "b", name: "B", status: "shadow", lastRoundHp: 5, force: 1 }),
+  ];
+  const rank = computeRanking(makeRoom(ps, 6));
+  assert.equal(rank.find((r) => r.playerId === "b")!.rank, 1);
+});
+
+// ---------- v1.0.1 规则漏洞修复 ----------
+console.log("v1.0.1 角色撞车抽取：");
+
+function withPrefs(prefs: Record<string, string | null>): Player[] {
+  return Object.entries(prefs).map(([id, pref], i) =>
+    makePlayer({ id, name: id, seatIndex: i, preferredRoleId: pref })
+  );
+}
+
+test("全不同：各自获得所选角色", () => {
+  const players = withPrefs({ a: "r1", b: "r2", c: "r3" });
+  const out = resolveRoleAssignments(players, ["r1", "r2", "r3", "r4"]);
+  assert.equal(out.a, "r1");
+  assert.equal(out.b, "r2");
+  assert.equal(out.c, "r3");
+});
+
+test("2 人撞同一角色：从剩余角色无放回抽取，结果唯一", () => {
+  const players = withPrefs({ a: "r1", b: "r1", c: "r2" });
+  const out = resolveRoleAssignments(players, ["r1", "r2", "r3"]);
+  assert.equal(out.c, "r2"); // 唯一选择者锁定
+  const vals = [out.a, out.b];
+  assert.ok(vals.every((v) => ["r1", "r3"].includes(v))); // 撞车者从剩余 {r1,r3} 取
+  assert.notEqual(out.a, out.b); // 唯一
+});
+
+test("多组撞车合并为同一池统一抽取，全部唯一", () => {
+  const players = withPrefs({ a: "r1", b: "r1", c: "r2", d: "r2" });
+  const out = resolveRoleAssignments(players, ["r1", "r2", "r3", "r4"]);
+  const vals = [out.a, out.b, out.c, out.d];
+  assert.equal(new Set(vals).size, 4); // 4 人 4 个不同角色
+  vals.forEach((v) => assert.ok(["r1", "r2", "r3", "r4"].includes(v)));
+});
+
+test("9 人全撞同一角色：从剩余池抽取，人人唯一", () => {
+  const prefs: Record<string, string> = {};
+  for (let i = 0; i < 9; i++) prefs[`p${i}`] = "r1";
+  const pool = Array.from({ length: 14 }, (_, i) => `r${i + 1}`);
+  const out = resolveRoleAssignments(withPrefs(prefs), pool);
+  const vals = Object.values(out);
+  assert.equal(vals.length, 9);
+  assert.equal(new Set(vals).size, 9);
+});
+
+test("角色池>9 时撞车者从剩余角色抽取", () => {
+  const players = withPrefs({ a: "r1", b: "r2", c: "r2" }); // b、c 撞
+  const out = resolveRoleAssignments(players, ["r1", "r2", "r3", "r4", "r5"]);
+  assert.equal(out.a, "r1");
+  assert.notEqual(out.b, out.c);
+  assert.ok([out.b, out.c].every((v) => v && v !== "r1"));
+});
+
+console.log("v1.0.1 顺位锁 / 行动 / 抽卡 / 激光：");
+
+function actionRoom(players: Player[], round = 1): GameRoom {
+  const r = makeRoom(players, round);
+  r.status = "ACTION";
+  r.currentPhase = "ACTION";
+  return r;
+}
+
+test("currentTurnPlayerId 取顺位最小的未结束存活玩家", () => {
+  const a = makePlayer({ id: "a", orderCard: 2, location: "B103" });
+  const b = makePlayer({ id: "b", orderCard: 1, location: "B103" });
+  assert.equal(currentTurnPlayerId(actionRoom([a, b])), "b");
+});
+
+test("非当前顺位玩家提交行动被拒，当前玩家可提交", () => {
+  const a = makePlayer({ id: "a", name: "A", orderCard: 1, location: "B103" });
+  const b = makePlayer({ id: "b", name: "B", orderCard: 2, location: "B103" });
+  const room = actionRoom([a, b]);
+  assert.throws(() => submitAction(room, "b", { toRoom: "B102", gasVoteFloor: "B1" }), /还没轮到/);
+  const after = submitAction(room, "a", { toRoom: "B102", gasVoteFloor: "B1" });
+  assert.ok(after.players.find((p) => p.id === "a")!.submittedAction);
+});
+
+test("结束行动后顺位推进到下一玩家，且不能再改", () => {
+  const a = makePlayer({ id: "a", name: "A", orderCard: 1, location: "B103" });
+  const b = makePlayer({ id: "b", name: "B", orderCard: 2, location: "B103" });
+  let room = actionRoom([a, b]);
+  room = submitAction(room, "a", { toRoom: "B102", gasVoteFloor: "B1" });
+  room = endTurn(room, "a");
+  assert.equal(currentTurnPlayerId(room), "b"); // 轮到 b
+  assert.throws(() => submitAction(room, "a", { toRoom: "B104", gasVoteFloor: "B1" }), /已结束|已提交/);
+});
+
+test("每次行动只能抽一次卡，第二次抛错", () => {
+  const a = makePlayer({ id: "a", name: "A", orderCard: 1, location: "B106", load: 9 });
+  let room = actionRoom([a]);
+  room.roomInventories = { B107: { knife: 5, pistol: 2 } };
+  room = submitAction(room, "a", { toRoom: "B107", gasVoteFloor: "B1" });
+  room = drawItemsFromRoom(room, "B107", "a", 2);
+  const pa = room.players.find((p) => p.id === "a")!;
+  assert.equal(pa.submittedAction!.hasDrawnFromRoom, true);
+  assert.ok((pa.submittedAction!.privateDrawResult ?? []).length > 0);
+  assert.throws(() => drawItemsFromRoom(room, "B107", "a", 2), /只能抽一次|已抽/);
+});
+
+test("抽卡日志为私密（不进公共日志）", () => {
+  const a = makePlayer({ id: "a", name: "A", orderCard: 1, location: "B106", load: 9 });
+  let room = actionRoom([a]);
+  room.roomInventories = { B107: { knife: 5 } };
+  room = submitAction(room, "a", { toRoom: "B107", gasVoteFloor: "B1" });
+  room = drawItemsFromRoom(room, "B107", "a", 1);
+  const pub = room.publicLogs.filter((l) => l.visibility === "public");
+  assert.ok(!pub.some((l) => /抽到|抽取/.test(l.message)), "公共日志不应含抽卡内容");
+  assert.ok(room.publicLogs.some((l) => l.visibility === "private" && l.playerId === "a"));
+});
+
+test("激光伤害延迟到结算：提交时不扣血，结算房间效果才 -1", () => {
+  // B103→102 相邻，路径含 102（激光室）
+  const a = makePlayer({ id: "a", name: "A", orderCard: 1, location: "B103", hp: 10 });
+  let room = actionRoom([a]);
+  room = submitAction(room, "a", { toRoom: "102", gasVoteFloor: "B1" });
+  assert.equal(room.players.find((p) => p.id === "a")!.hp, 10, "提交后不立即扣血");
+  const prev = buildResolutionPreview(room);
+  assert.equal(prev.nextRoom.players[0].hp, 9, "结算后 -1");
+  const roomStep = prev.steps.find((s) => s.type === "roomEffects")!;
+  assert.ok(roomStep.logs.some((m) => /激光/.test(m)));
+});
+
+test("暗影经过激光室不受伤害", () => {
+  const s = makePlayer({ id: "s", status: "shadow", location: "B103", hp: 0, submittedAction: { round: 1, fromRoom: "B103", toRoom: "102", path: ["B103", "102"], gasVoteFloor: null, submittedAt: "" } });
+  const prev = buildResolutionPreview(makeRoom([s], 1));
+  assert.equal(prev.nextRoom.players[0].hp, 0);
+});
+
+console.log("v1.0.1 侦探 / 催眠：");
+
+test("侦探跟踪已结束行动的前序玩家，移动到其终点房间", () => {
+  const target = makePlayer({ id: "t", name: "T", orderCard: 1, location: "B103", endedAction: true, submittedAction: { round: 1, fromRoom: "B103", toRoom: "B107", path: ["B103", "B107"], gasVoteFloor: "B1", submittedAt: "" } });
+  const det = makePlayer({ id: "d", name: "D", roleId: "detective", orderCard: 2, location: "B102", roleUses: 0 });
+  let room = actionRoom([target, det]);
+  room.roomInventories = { B107: {} };
+  room = submitAction(room, "d", { toRoom: "B102", gasVoteFloor: "B1", roleSkill: { type: "track", targetPlayerIds: ["t"] } });
+  const pd = room.players.find((p) => p.id === "d")!;
+  assert.equal(pd.submittedAction!.toRoom, "B107"); // 跟随到目标终点
+  assert.equal(pd.roleUses, 1);
+  assert.equal(room.players.find((p) => p.id === "t")!.trackedDone, true);
+});
+
+test("催眠 5 步不可达时抛错（强制移动失败）", () => {
+  // B603（B6）到 201（2F）远超 5 步
+  const hyp = makePlayer({ id: "h", name: "H", roleId: "hypnotist", location: "B603", submittedAction: { round: 1, fromRoom: "B603", toRoom: "B602", gasVoteFloor: "B1", roleSkill: { type: "charm", targetPlayerIds: ["v"], targetRoom: "201" }, submittedAt: "" } });
+  const v = makePlayer({ id: "v", name: "V", location: "B603" });
+  assert.throws(() => applyDeclaredSkill(makeRoom([hyp, v], 1), "h"), /5 步|到达/);
+});
+
+console.log("地图编辑器草稿数据 / 校验 / 寻路：");
+
+test("默认布局覆盖全部规则房间且无未知房间", () => {
+  const issues = validateMapData(DEFAULT_MAP_LAYOUT, DEFAULT_MAP_CONNECTIONS);
+  const errors = issues.filter((i) => i.level === "error");
+  assert.equal(errors.length, 0, errors.map((e) => e.message).join("；"));
+});
+
+test("默认连接无孤立房间", () => {
+  const issues = validateMapData(DEFAULT_MAP_LAYOUT, DEFAULT_MAP_CONNECTIONS);
+  const isolated = issues.filter((i) => i.message.startsWith("孤立房间"));
+  assert.equal(isolated.length, 0, isolated.map((e) => e.message).join("；"));
+});
+
+test("连接图最短路径：B103 → B107 经廊桥 4 步（与 mapGraph 图结构一致）", () => {
+  const r = shortestPath(DEFAULT_MAP_CONNECTIONS, "B103", "B107");
+  assert.ok(r, "应可达");
+  assert.equal(r!.steps, 4); // B103→B104→B105→B106(廊桥)→B107
+  assert.ok(r!.edgeTypes.includes("bridge"));
+});
+
+test("校验能检测重复连接", () => {
+  const dup = [
+    { id: "a", from: "101", to: "102", type: "adjacent" as const, bidirectional: true },
+    { id: "b", from: "102", to: "101", type: "adjacent" as const, bidirectional: true },
+  ];
+  const issues = validateMapData(DEFAULT_MAP_LAYOUT, dup);
+  assert.ok(issues.some((i) => i.message.startsWith("重复连接")));
+});
+
+test("makeConnectionId 双向与端点顺序无关、单向保留方向", () => {
+  assert.equal(makeConnectionId("B105", "B103", "adjacent", true), makeConnectionId("B103", "B105", "adjacent", true));
+  assert.notEqual(makeConnectionId("B105", "B503", "pipe", false), makeConnectionId("B503", "B105", "pipe", false));
 });
 
 console.log(`\n结果：${passed} 通过，${failed} 失败`);

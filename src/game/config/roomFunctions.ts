@@ -25,10 +25,10 @@ export const ROOM_FUNCTIONS: RoomFunctionConfig[] = [
   { roomId: "B301", name: "药房", effect: "抽取药片、肾上腺素。", drawLimit: 2, initialStock: "3 药片、3 肾上腺素" },
   { roomId: "B304", name: "操作室", effect: "可立即重新分配自己的基因点数。", drawLimit: 0, initialStock: "无" },
   { roomId: "B403", name: "传送室", effect: "经过时可消耗 1 步传送至任意普通房间。", drawLimit: 0, initialStock: "无" },
-  { roomId: "B501", name: "大仓库", effect: "抽取综合物资；B4 与 B5 都成为毒气楼层时本房间才成为毒气区域。", drawLimit: 3, initialStock: "5 水、5 粮、3 刀、2 酒、2 药片、2 肾上腺素、1 手枪、1 金条、1 霰弹枪" },
+  { roomId: "B501", name: "大仓库", effect: "抽取综合物资；B4 与 B5 都成为毒气楼层时本房间才成为毒气区域。", drawLimit: 3, initialStock: "5 水、5 粮、3 刀、2 果汁、2 药片、2 肾上腺素、1 手枪、1 金条、1 霰弹枪" },
   { roomId: "B503", name: "垃圾场", effect: "最多抽 5 张；无法使用金条；一次抽到 2 张以上非垃圾道具时最多选 2 张非垃圾道具。", drawLimit: 5, initialStock: "20 垃圾、1 绳索、1 防毒面具、1 火箭筒、1 次元口袋、1 循环回收装置" },
   { roomId: "B505", name: "粮仓", effect: "抽取粮食。", drawLimit: 4, initialStock: "10 粮食" },
-  { roomId: "B601", name: "酒窖", effect: "抽取酒。", drawLimit: 2, initialStock: "6 酒" },
+  { roomId: "B601", name: "酒窖", effect: "抽取果汁。", drawLimit: 2, initialStock: "6 果汁" },
   { roomId: "B701", name: "停尸间", effect: "抽取本轮前所有死亡玩家留下的道具卡。", drawLimit: 3, initialStock: "死亡玩家遗物" },
 ];
 

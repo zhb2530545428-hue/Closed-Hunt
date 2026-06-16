@@ -6,22 +6,66 @@ import { appendLog, makeLog, nowISO, shuffle } from "./helpers";
 import { addAirdropForRound } from "./draw";
 import { buildResolutionPreview, applyFinalGoldConversion } from "../resolution";
 
-/** 进入行动阶段：为存活玩家随机生成顺位卡（规则 6.1） */
-function enterAction(room: GameRoom): GameRoom {
+/** 为存活在座玩家随机生成顺位卡（规则 6.1，自由阶段抽取，可在自由阶段交易）。 */
+export function assignOrderCards(room: GameRoom): GameRoom {
   const alive = room.players.filter((p) => p.status === "alive" && p.name);
   const order = shuffle(alive.map((p) => p.id));
   const orderMap = new Map(order.map((id, idx) => [id, idx + 1]));
   const players: Player[] = room.players.map((p) =>
     orderMap.has(p.id) ? { ...p, orderCard: orderMap.get(p.id)! } : { ...p, orderCard: null }
   );
-  let next: GameRoom = { ...room, players, currentPhase: "ACTION", status: "ACTION", updatedAt: nowISO() };
-  next = appendLog(next, `第 ${room.currentRound} 轮行动阶段开始，已随机生成顺位卡。`);
+  return { ...room, players, updatedAt: nowISO() };
+}
+
+/** 进入行动阶段：顺位卡已在自由阶段抽取；缺失则补发；清除上一阶段的「已结束行动」。 */
+function enterAction(room: GameRoom): GameRoom {
+  let base = room;
+  const aliveNoCard = room.players.some((p) => p.status === "alive" && p.name && p.orderCard == null);
+  if (aliveNoCard) base = assignOrderCards(room);
+  // §7：每次进入行动阶段重置「已结束行动」标记，确保按顺位重新行动。
+  const players = base.players.map((p) => ({ ...p, endedAction: false }));
+  let next: GameRoom = { ...base, players, currentPhase: "ACTION", status: "ACTION", updatedAt: nowISO() };
+  next = appendLog(next, `第 ${room.currentRound} 轮行动阶段开始，按顺位卡依次行动。`);
+  return next;
+}
+
+/**
+ * 当前应行动的玩家 id（§7 严格顺位）：本轮存活、在座、有顺位卡、尚未结束行动者中，
+ * 顺位卡数字最小者。全部结束行动或无人可行动时返回 null。
+ */
+export function currentTurnPlayerId(room: GameRoom): string | null {
+  const pending = room.players.filter(
+    (p) => p.name && p.status === "alive" && p.orderCard != null && !p.endedAction
+  );
+  if (pending.length === 0) return null;
+  pending.sort((a, b) => (a.orderCard ?? 0) - (b.orderCard ?? 0));
+  return pending[0].id;
+}
+
+/**
+ * 结束本轮行动（§7 两段式收尾）：仅当前顺位玩家、已提交移动后可调用；
+ * 调用后整轮锁定不可再改，轮到下一顺位。对外仅公开「已完成行动」这一非敏感信息（§13）。
+ */
+export function endTurn(room: GameRoom, playerId: string): GameRoom {
+  if (room.currentPhase !== "ACTION") throw new Error("当前不是行动阶段。");
+  const player = room.players.find((p) => p.id === playerId);
+  if (!player) throw new Error("玩家不存在。");
+  if (player.endedAction) throw new Error("你已结束本轮行动。");
+  const turnId = currentTurnPlayerId(room);
+  if (player.orderCard != null && turnId && turnId !== playerId) throw new Error("还没轮到你行动。");
+  if (player.status === "alive" && !player.submittedAction) {
+    throw new Error("请先提交本轮移动再结束行动。");
+  }
+  const players = room.players.map((p) => (p.id === playerId ? { ...p, endedAction: true } : p));
+  let next: GameRoom = { ...room, players, updatedAt: nowISO() };
+  next = appendLog(next, `${player.name} 已完成行动。`);
   return next;
 }
 
 function enterFree(room: GameRoom): GameRoom {
-  let next: GameRoom = { ...room, currentPhase: "FREE", status: "FREE", updatedAt: nowISO() };
-  next = appendLog(next, `第 ${room.currentRound} 轮自由阶段开始。`);
+  let next = assignOrderCards(room);
+  next = { ...next, currentPhase: "FREE", status: "FREE", trades: [], closedRooms: [], updatedAt: nowISO() };
+  next = appendLog(next, `第 ${room.currentRound} 轮自由阶段开始，已抽取顺位卡，可在本阶段交易。`);
   return next;
 }
 
@@ -84,11 +128,23 @@ export function confirmResolution(room: GameRoom): GameRoom {
   );
   let applied: GameRoom = { ...resolved, publicLogs: [...resolved.publicLogs, ...logs] };
 
-  // 2. 第 6 轮结束 → 最终结算
+  // 2. 提前结束判定（规则 17.1 / 17.4）
+  const seated = applied.players.filter((p) => p.name);
+  const aliveCount = seated.filter((p) => p.status === "alive").length;
+  if (aliveCount <= 1) {
+    const winner = seated.find((p) => p.status === "alive");
+    applied = appendLog(
+      applied,
+      winner ? `仅剩 1 名存活玩家 ${winner.name}，立即获胜，游戏结束。` : "所有玩家均已成为暗影，游戏结束。"
+    );
+    return finalize(applied);
+  }
+
+  // 3. 第 6 轮结束 → 最终结算
   if (applied.currentRound >= TOTAL_ROUNDS) {
     return finalize(applied);
   }
-  // 3. 否则进入下一轮
+  // 4. 否则进入下一轮
   return advanceToNextRound(applied);
 }
 
@@ -109,7 +165,8 @@ function advanceToNextRound(room: GameRoom): GameRoom {
 
   const players: Player[] = room.players.map((p) => {
     if (!p.name) return p;
-    const np: Player = { ...p, lastRoundHp: p.hp, orderCard: null };
+    // 每轮重置职业的本轮临时状态（被催眠强制房间、死亡预告标记）与行动锁
+    const np: Player = { ...p, lastRoundHp: p.hp, orderCard: null, forcedRoom: null, forecastedBy: [], endedAction: false };
 
     // 复活生效（规则 13.5/13.6）
     if (np.reviveNextRound && np.lastDrainRoomId) {
@@ -151,10 +208,13 @@ function advanceToNextRound(room: GameRoom): GameRoom {
     currentRound: newRound,
     currentPhase: "FREE",
     status: "FREE",
+    trades: [], // 新一轮清空上一轮交易
+    closedRooms: [], // 黑客关闭的房间仅持续本轮
     updatedAt: nowISO(),
   };
+  next = assignOrderCards(next); // 自由阶段抽取顺位卡（规则 6.1）
   next = addAirdropForRound(next, newRound);
-  next = appendLog(next, `进入第 ${newRound} 轮，自由阶段开始。`);
+  next = appendLog(next, `进入第 ${newRound} 轮，自由阶段开始，已抽取顺位卡。`);
   return next;
 }
 

@@ -38,9 +38,27 @@ export function makeLog(
   };
 }
 
-/** 向房间追加日志并更新时间戳，返回新房间对象 */
+/** 向房间追加【公开】日志并更新时间戳，返回新房间对象 */
 export function appendLog(room: GameRoom, ...messages: string[]): GameRoom {
-  const logs = messages.map((m) => makeLog(room, m));
+  const logs = messages.map((m) => makeLog(room, m, "public"));
+  return {
+    ...room,
+    publicLogs: [...room.publicLogs, ...logs],
+    updatedAt: nowISO(),
+  };
+}
+
+/**
+ * 追加【私密】日志（仅该玩家本人可见，行动阶段不对外公开）。
+ * 来源：v1.0.1 §13（公开日志延迟到结算后展示）。
+ * 与公开日志同存于 publicLogs 数组，靠 visibility 字段区分；展示层按 visibility 过滤。
+ */
+export function appendPrivateLog(
+  room: GameRoom,
+  playerId: string,
+  ...messages: string[]
+): GameRoom {
+  const logs = messages.map((m) => makeLog(room, m, "private", playerId));
   return {
     ...room,
     publicLogs: [...room.publicLogs, ...logs],

@@ -27,7 +27,7 @@ export const ITEMS: ItemConfig[] = [
   { id: "food", name: "粮食", type: "consumable", weight: 1, description: "第 2 轮起水粮步骤可上交抵抗饥饿。", timing: "结算阶段水粮步骤" },
   { id: "pill", name: "药片", type: "consumable", weight: 1, description: "生命值 +2，不超过上限。", timing: "结算阶段道具回血/状态步骤" },
   { id: "adrenaline", name: "肾上腺素", type: "consumable", weight: 1, description: "公开使用，下一轮生效：速度变 10；下一轮伤害最多降至 1 不死亡。", timing: "结算阶段使用，下一轮生效" },
-  { id: "wine", name: "酒", type: "consumable", weight: 1, description: "公开使用，掷骰并立即执行结果。", timing: "结算阶段道具回血/状态步骤" },
+  { id: "juice", name: "果汁", type: "consumable", weight: 1, description: "公开使用，掷骰并立即执行结果。", timing: "结算阶段道具回血/状态步骤" },
   { id: "gold", name: "金条", type: "settlement", weight: 1, description: "抽卡时额外选 1 张（不能选金条）；最终结算 1 金条兑 1 生命。", timing: "抽卡时 / 最终结算" },
   { id: "knife", name: "刀", type: "weapon", weight: 1, weaponBonus: 2, isGun: false, description: "战斗力 +2。", timing: "持有生效" },
   { id: "pistol", name: "手枪", type: "weapon", weight: 1, weaponBonus: 2, isGun: true, description: "战斗力 +2；属于枪，对无枪玩家压制。", timing: "持有生效" },
@@ -42,12 +42,29 @@ export const ITEMS: ItemConfig[] = [
 
 const ITEM_MAP: Record<string, ItemConfig> = Object.fromEntries(ITEMS.map((i) => [i.id, i]));
 
+/**
+ * 旧 itemId 兼容映射（v1.0.1：「酒」统一为「果汁」）。
+ * 用于读档迁移与显示兜底，保证旧存档中的 wine / 酒 不报错。
+ */
+export const ITEM_ID_ALIASES: Record<string, string> = {
+  wine: "juice",
+  alcohol: "juice",
+  liquor: "juice",
+  beer: "juice",
+  酒: "juice",
+};
+
+/** 归一化 itemId（应用旧别名映射）。 */
+export function normalizeItemId(id: string): string {
+  return ITEM_ID_ALIASES[id] ?? id;
+}
+
 export function getItem(id: string): ItemConfig | undefined {
-  return ITEM_MAP[id];
+  return ITEM_MAP[id] ?? ITEM_MAP[normalizeItemId(id)];
 }
 
 export function getItemName(id: string): string {
-  return ITEM_MAP[id]?.name ?? id;
+  return ITEM_MAP[id]?.name ?? ITEM_MAP[normalizeItemId(id)]?.name ?? id;
 }
 
 export function isGunItem(id: string): boolean {

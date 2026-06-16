@@ -1,0 +1,915 @@
+{
+  "layout": [
+    {
+      "id": "201",
+      "name": "基因库",
+      "floor": "2F",
+      "x": 299,
+      "y": 66,
+      "width": 197,
+      "height": 71
+    },
+    {
+      "id": "202",
+      "name": "停机坪",
+      "floor": "2F",
+      "x": 741,
+      "y": 80,
+      "width": 241,
+      "height": 56
+    },
+    {
+      "id": "101",
+      "name": "水塔",
+      "floor": "1F",
+      "x": 178,
+      "y": 140,
+      "width": 60,
+      "height": 72
+    },
+    {
+      "id": "102",
+      "name": "激光室",
+      "floor": "1F",
+      "x": 299,
+      "y": 140,
+      "width": 196,
+      "height": 72
+    },
+    {
+      "id": "103",
+      "name": "",
+      "floor": "1F",
+      "x": 742,
+      "y": 141,
+      "width": 80,
+      "height": 72
+    },
+    {
+      "id": "104",
+      "name": "",
+      "floor": "1F",
+      "x": 824,
+      "y": 140,
+      "width": 157,
+      "height": 72
+    },
+    {
+      "id": "B101",
+      "name": "控制室",
+      "floor": "B1",
+      "x": 98,
+      "y": 215,
+      "width": 77,
+      "height": 71
+    },
+    {
+      "id": "B102",
+      "name": "",
+      "floor": "B1",
+      "x": 176,
+      "y": 215,
+      "width": 65,
+      "height": 72
+    },
+    {
+      "id": "B103",
+      "name": "",
+      "floor": "B1",
+      "x": 243,
+      "y": 216,
+      "width": 55,
+      "height": 70
+    },
+    {
+      "id": "B104",
+      "name": "",
+      "floor": "B1",
+      "x": 300,
+      "y": 215,
+      "width": 198,
+      "height": 71
+    },
+    {
+      "id": "B105",
+      "name": "回收站",
+      "floor": "B1",
+      "x": 501,
+      "y": 215,
+      "width": 119,
+      "height": 71
+    },
+    {
+      "id": "B106",
+      "name": "",
+      "floor": "B1",
+      "x": 784,
+      "y": 215,
+      "width": 78,
+      "height": 72
+    },
+    {
+      "id": "B107",
+      "name": "武器库",
+      "floor": "B1",
+      "x": 863,
+      "y": 215,
+      "width": 118,
+      "height": 72
+    },
+    {
+      "id": "B201",
+      "name": "",
+      "floor": "B2",
+      "x": 99,
+      "y": 290,
+      "width": 116,
+      "height": 72
+    },
+    {
+      "id": "B202",
+      "name": "手术室",
+      "floor": "B2",
+      "x": 218,
+      "y": 290,
+      "width": 79,
+      "height": 71
+    },
+    {
+      "id": "B203",
+      "name": "",
+      "floor": "B2",
+      "x": 300,
+      "y": 291,
+      "width": 115,
+      "height": 69
+    },
+    {
+      "id": "B204",
+      "name": "餐厅",
+      "floor": "B2",
+      "x": 418,
+      "y": 291,
+      "width": 82,
+      "height": 70
+    },
+    {
+      "id": "B205",
+      "name": "",
+      "floor": "B2",
+      "x": 504,
+      "y": 291,
+      "width": 76,
+      "height": 70
+    },
+    {
+      "id": "B206",
+      "name": "金库",
+      "floor": "B2",
+      "x": 744,
+      "y": 290,
+      "width": 238,
+      "height": 72
+    },
+    {
+      "id": "B301",
+      "name": "药房",
+      "floor": "B3",
+      "x": 98,
+      "y": 367,
+      "width": 77,
+      "height": 68
+    },
+    {
+      "id": "B302",
+      "name": "",
+      "floor": "B3",
+      "x": 177,
+      "y": 365,
+      "width": 80,
+      "height": 71
+    },
+    {
+      "id": "B303",
+      "name": "",
+      "floor": "B3",
+      "x": 258,
+      "y": 365,
+      "width": 78,
+      "height": 70
+    },
+    {
+      "id": "B304",
+      "name": "操作室",
+      "floor": "B3",
+      "x": 339,
+      "y": 364,
+      "width": 78,
+      "height": 72
+    },
+    {
+      "id": "B305",
+      "name": "",
+      "floor": "B3",
+      "x": 420,
+      "y": 364,
+      "width": 159,
+      "height": 74
+    },
+    {
+      "id": "B306",
+      "name": "",
+      "floor": "B3",
+      "x": 743,
+      "y": 364,
+      "width": 52,
+      "height": 73
+    },
+    {
+      "id": "B307",
+      "name": "",
+      "floor": "B3",
+      "x": 797,
+      "y": 365,
+      "width": 104,
+      "height": 71
+    },
+    {
+      "id": "B308",
+      "name": "",
+      "floor": "B3",
+      "x": 902,
+      "y": 365,
+      "width": 82,
+      "height": 72
+    },
+    {
+      "id": "B401",
+      "name": "",
+      "floor": "B4",
+      "x": 339,
+      "y": 440,
+      "width": 158,
+      "height": 71
+    },
+    {
+      "id": "B402",
+      "name": "",
+      "floor": "B4",
+      "x": 500,
+      "y": 441,
+      "width": 80,
+      "height": 70
+    },
+    {
+      "id": "B403",
+      "name": "传送室",
+      "floor": "B4",
+      "x": 742,
+      "y": 439,
+      "width": 78,
+      "height": 71
+    },
+    {
+      "id": "B404",
+      "name": "",
+      "floor": "B4",
+      "x": 821,
+      "y": 439,
+      "width": 82,
+      "height": 72
+    },
+    {
+      "id": "B405",
+      "name": "",
+      "floor": "B4",
+      "x": 905,
+      "y": 440,
+      "width": 77,
+      "height": 70
+    },
+    {
+      "id": "B501",
+      "name": "大仓库",
+      "floor": "B5",
+      "x": 99,
+      "y": 440,
+      "width": 237,
+      "height": 145
+    },
+    {
+      "id": "B502",
+      "name": "",
+      "floor": "B5",
+      "x": 340,
+      "y": 515,
+      "width": 118,
+      "height": 70
+    },
+    {
+      "id": "B503",
+      "name": "垃圾场",
+      "floor": "B5",
+      "x": 460,
+      "y": 514,
+      "width": 157,
+      "height": 72
+    },
+    {
+      "id": "B504",
+      "name": "",
+      "floor": "B5",
+      "x": 743,
+      "y": 513,
+      "width": 118,
+      "height": 73
+    },
+    {
+      "id": "B505",
+      "name": "粮仓",
+      "floor": "B5",
+      "x": 863,
+      "y": 512,
+      "width": 118,
+      "height": 72
+    },
+    {
+      "id": "B601",
+      "name": "酒窖",
+      "floor": "B6",
+      "x": 304,
+      "y": 589,
+      "width": 195,
+      "height": 70
+    },
+    {
+      "id": "B602",
+      "name": "",
+      "floor": "B6",
+      "x": 503,
+      "y": 589,
+      "width": 116,
+      "height": 72
+    },
+    {
+      "id": "B603",
+      "name": "",
+      "floor": "B6",
+      "x": 620,
+      "y": 590,
+      "width": 119,
+      "height": 72
+    },
+    {
+      "id": "B604",
+      "name": "",
+      "floor": "B6",
+      "x": 742,
+      "y": 591,
+      "width": 116,
+      "height": 70
+    },
+    {
+      "id": "B701",
+      "name": "停尸间",
+      "floor": "B7",
+      "x": 504,
+      "y": 665,
+      "width": 114,
+      "height": 72
+    }
+  ],
+  "connections": [
+    {
+      "id": "adjacent:103-104",
+      "from": "103",
+      "to": "104",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B101-B102",
+      "from": "B101",
+      "to": "B102",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B102-B103",
+      "from": "B102",
+      "to": "B103",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B103-B104",
+      "from": "B103",
+      "to": "B104",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B104-B105",
+      "from": "B104",
+      "to": "B105",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B106-B107",
+      "from": "B106",
+      "to": "B107",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B201-B202",
+      "from": "B201",
+      "to": "B202",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B202-B203",
+      "from": "B202",
+      "to": "B203",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B203-B204",
+      "from": "B203",
+      "to": "B204",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B204-B205",
+      "from": "B204",
+      "to": "B205",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B301-B302",
+      "from": "B301",
+      "to": "B302",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B302-B303",
+      "from": "B302",
+      "to": "B303",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B303-B304",
+      "from": "B303",
+      "to": "B304",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B304-B305",
+      "from": "B304",
+      "to": "B305",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B306-B307",
+      "from": "B306",
+      "to": "B307",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B307-B308",
+      "from": "B307",
+      "to": "B308",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B401-B402",
+      "from": "B401",
+      "to": "B402",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B403-B404",
+      "from": "B403",
+      "to": "B404",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B404-B405",
+      "from": "B404",
+      "to": "B405",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B501-B502",
+      "from": "B501",
+      "to": "B502",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B502-B503",
+      "from": "B502",
+      "to": "B503",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B504-B505",
+      "from": "B504",
+      "to": "B505",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B601-B602",
+      "from": "B601",
+      "to": "B602",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B602-B603",
+      "from": "B602",
+      "to": "B603",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "stairs:102-201",
+      "from": "201",
+      "to": "102",
+      "type": "stairs",
+      "bidirectional": true
+    },
+    {
+      "id": "stairs:B602-B701",
+      "from": "B602",
+      "to": "B701",
+      "type": "stairs",
+      "bidirectional": true
+    },
+    {
+      "id": "stairs:B204-B304",
+      "from": "B204",
+      "to": "B304",
+      "type": "stairs",
+      "bidirectional": true
+    },
+    {
+      "id": "stairs:B402-B503",
+      "from": "B402",
+      "to": "B503",
+      "type": "stairs",
+      "bidirectional": true
+    },
+    {
+      "id": "stairs:B307-B404",
+      "from": "B307",
+      "to": "B404",
+      "type": "stairs",
+      "bidirectional": true
+    },
+    {
+      "id": "stairs:B106-B206",
+      "from": "B106",
+      "to": "B206",
+      "type": "stairs",
+      "bidirectional": true
+    },
+    {
+      "id": "stairs:B504-B604",
+      "from": "B504",
+      "to": "B604",
+      "type": "stairs",
+      "bidirectional": true
+    },
+    {
+      "id": "bridge:B105-B106",
+      "from": "B105",
+      "to": "B106",
+      "type": "bridge",
+      "bidirectional": true
+    },
+    {
+      "id": "bridge:B305-B306",
+      "from": "B305",
+      "to": "B306",
+      "type": "bridge",
+      "bidirectional": true
+    },
+    {
+      "id": "pipe:B105-B503:dir",
+      "from": "B105",
+      "to": "B503",
+      "type": "pipe",
+      "bidirectional": false,
+      "note": "回收站垃圾管道，单向，消耗 1 步"
+    },
+    {
+      "id": "helicopter:202-B101:dir",
+      "from": "202",
+      "to": "B101",
+      "type": "helicopter",
+      "bidirectional": false,
+      "note": "停机坪直升机目标（下一轮消耗 1 步）"
+    },
+    {
+      "id": "helicopter:202-101:dir",
+      "from": "202",
+      "to": "101",
+      "type": "helicopter",
+      "bidirectional": false,
+      "note": "停机坪直升机目标（下一轮消耗 1 步）"
+    },
+    {
+      "id": "helicopter:202-B103:dir",
+      "from": "202",
+      "to": "B103",
+      "type": "helicopter",
+      "bidirectional": false,
+      "note": "停机坪直升机目标（下一轮消耗 1 步）"
+    },
+    {
+      "id": "helicopter:202-201:dir",
+      "from": "202",
+      "to": "201",
+      "type": "helicopter",
+      "bidirectional": false,
+      "note": "停机坪直升机目标（下一轮消耗 1 步）"
+    },
+    {
+      "id": "helicopter:202-B105:dir",
+      "from": "202",
+      "to": "B105",
+      "type": "helicopter",
+      "bidirectional": false,
+      "note": "停机坪直升机目标（下一轮消耗 1 步）"
+    },
+    {
+      "id": "stairs:104-202",
+      "from": "202",
+      "to": "104",
+      "type": "stairs",
+      "bidirectional": true
+    },
+    {
+      "id": "stairs:103-B106",
+      "from": "103",
+      "to": "B106",
+      "type": "stairs",
+      "bidirectional": true
+    },
+    {
+      "id": "stairs:B206-B308",
+      "from": "B206",
+      "to": "B308",
+      "type": "stairs",
+      "bidirectional": true
+    },
+    {
+      "id": "stairs:B405-B505",
+      "from": "B405",
+      "to": "B505",
+      "type": "stairs",
+      "bidirectional": true
+    },
+    {
+      "id": "adjacent:B603-B604",
+      "from": "B604",
+      "to": "B603",
+      "type": "adjacent",
+      "bidirectional": true
+    },
+    {
+      "id": "stairs:B501-B601",
+      "from": "B601",
+      "to": "B501",
+      "type": "stairs",
+      "bidirectional": true
+    },
+    {
+      "id": "stairs:B304-B401",
+      "from": "B401",
+      "to": "B304",
+      "type": "stairs",
+      "bidirectional": true
+    },
+    {
+      "id": "stairs:B204-B305",
+      "from": "B305",
+      "to": "B204",
+      "type": "stairs",
+      "bidirectional": true
+    },
+    {
+      "id": "stairs:B105-B205",
+      "from": "B205",
+      "to": "B105",
+      "type": "stairs",
+      "bidirectional": true
+    },
+    {
+      "id": "stairs:102-B104",
+      "from": "B104",
+      "to": "102",
+      "type": "stairs",
+      "bidirectional": true
+    },
+    {
+      "id": "stairs:B102-B201",
+      "from": "B201",
+      "to": "B102",
+      "type": "stairs",
+      "bidirectional": true
+    },
+    {
+      "id": "stairs:101-B102",
+      "from": "101",
+      "to": "B102",
+      "type": "stairs",
+      "bidirectional": true
+    },
+    {
+      "id": "teleport:B403-103:dir",
+      "from": "B403",
+      "to": "103",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-104:dir",
+      "from": "B403",
+      "to": "104",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-B102:dir",
+      "from": "B403",
+      "to": "B102",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-B103:dir",
+      "from": "B403",
+      "to": "B103",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-B104:dir",
+      "from": "B403",
+      "to": "B104",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-B106:dir",
+      "from": "B403",
+      "to": "B106",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-B201:dir",
+      "from": "B403",
+      "to": "B201",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-B203:dir",
+      "from": "B403",
+      "to": "B203",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-B205:dir",
+      "from": "B403",
+      "to": "B205",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-B302:dir",
+      "from": "B403",
+      "to": "B302",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-B303:dir",
+      "from": "B403",
+      "to": "B303",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-B305:dir",
+      "from": "B403",
+      "to": "B305",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-B306:dir",
+      "from": "B403",
+      "to": "B306",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-B307:dir",
+      "from": "B403",
+      "to": "B307",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-B308:dir",
+      "from": "B403",
+      "to": "B308",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-B401:dir",
+      "from": "B403",
+      "to": "B401",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-B402:dir",
+      "from": "B403",
+      "to": "B402",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-B404:dir",
+      "from": "B403",
+      "to": "B404",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-B405:dir",
+      "from": "B403",
+      "to": "B405",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-B502:dir",
+      "from": "B403",
+      "to": "B502",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-B504:dir",
+      "from": "B403",
+      "to": "B504",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-B602:dir",
+      "from": "B403",
+      "to": "B602",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-B603:dir",
+      "from": "B403",
+      "to": "B603",
+      "type": "teleport",
+      "bidirectional": false
+    },
+    {
+      "id": "teleport:B403-B604:dir",
+      "from": "B403",
+      "to": "B604",
+      "type": "teleport",
+      "bidirectional": false
+    }
+  ]
+}

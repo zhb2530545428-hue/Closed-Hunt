@@ -4,7 +4,7 @@ import { useState } from "react";
 import { useParams } from "next/navigation";
 import Link from "next/link";
 import { useGameStore } from "@/store/useGameStore";
-import { useEnsureHydrated } from "@/components/store-hooks";
+import { useEnsureHydrated, useWatchRoom } from "@/components/store-hooks";
 import { Button, Card, Badge, cls } from "@/components/ui";
 import { GameMap } from "@/components/GameMap";
 import type { GameRoom, Player, ResolutionStep } from "@/game/types";
@@ -20,18 +20,28 @@ import {
   addPublicLog,
   computeRanking,
   tallyGasVotes,
+  setPlayerLocation,
+  setPlayerGenes,
+  adjustPlayerItem,
+  setOrderCard,
+  adjustRoleUses,
+  toggleGasFloor,
+  toggleClearedRoom,
+  cancelTrade,
 } from "@/game/engine";
+import type { SnapshotMeta } from "@/store/sync";
 import { getInventoryWeight } from "@/game/inventory";
 import { getRole } from "@/game/config/roles";
-import { getFloorLabel } from "@/game/config/floors";
-import { getItemName } from "@/game/config/items";
-import { getRoomLabel } from "@/game/config/rooms";
+import { FLOORS, getFloorLabel } from "@/game/config/floors";
+import { getItemName, ITEMS } from "@/game/config/items";
+import { getRoomLabel, ROOMS } from "@/game/config/rooms";
 import { PHASE_INFO } from "@/game/config/phases";
 
 export default function BoardPage() {
   const params = useParams<{ roomCode: string }>();
   const code = (params.roomCode as string)?.toUpperCase();
   const hydrated = useEnsureHydrated();
+  useWatchRoom(code);
 
   const room = useGameStore((s) => s.rooms[code]);
   const myId = useGameStore((s) => s.identities[code]);
@@ -105,7 +115,7 @@ export default function BoardPage() {
       {room.resolutionPreview && <PreviewPanel room={room} />}
 
       {isHost ? (
-        <HostConsole room={room} seated={seated} run={run} />
+        <HostConsole room={room} seated={seated} run={run} code={code} />
       ) : (
         <Card title="房主控制台" className="mt-4">
           <p className="text-sm text-slate-400">仅房主可操作。切换身份为房主（{room.players.find((p) => p.id === room.hostPlayerId)?.name}）后可见。</p>
@@ -116,32 +126,43 @@ export default function BoardPage() {
 }
 
 function PlayersBoard({ room, seated, isHost }: { room: GameRoom; seated: Player[]; isHost: boolean }) {
+  // §12：按本轮顺位升序（暗影无顺位卡，排末尾）。准备阶段无顺位则按座位号。
+  const ordered = [...seated].sort((a, b) => {
+    const oa = a.orderCard ?? 999;
+    const ob = b.orderCard ?? 999;
+    return oa - ob || a.seatIndex - b.seatIndex;
+  });
+  const isAction = room.currentPhase === "ACTION";
   return (
-    <Card title="玩家">
+    <Card title="玩家（按本轮顺位）">
       <div className="space-y-2">
-        {seated.map((p) => {
+        {ordered.map((p) => {
           const counts: Record<string, number> = {};
           for (const id of p.inventory) counts[id] = (counts[id] ?? 0) + 1;
           return (
             <div key={p.id} className="bg-ink-700 rounded px-3 py-2">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <span className="text-slate-400 text-xs">{p.seatIndex + 1}.</span>
-                  <span className="font-medium">{p.name}</span>
+                  <span className="text-slate-400 text-xs w-10">
+                    {p.status === "shadow" ? "暗影" : p.orderCard != null ? `顺位${p.orderCard}` : `#${p.seatIndex + 1}`}
+                  </span>
+                  <span className="font-medium">P{p.seatIndex + 1} {p.name}</span>
+                  <span className="text-slate-400 text-xs">｜{getRole(p.roleId)?.name ?? "—"}</span>
                   {p.id === room.hostPlayerId && <span className="text-gold text-xs">房主</span>}
                   {p.status === "shadow" ? <Badge tone="shadow">暗影</Badge> : <Badge tone="toxic">存活</Badge>}
                   {p.reviveProtectedRound === room.currentRound && <Badge tone="gold">复活保护</Badge>}
                 </div>
                 <div className="flex items-center gap-3 text-sm">
                   <span className="text-red-300">❤ {p.hp}/{p.maxHp}</span>
-                  {room.currentPhase === "ACTION" && (p.submittedAction ? <Badge tone="toxic">已提交</Badge> : <Badge>未提交</Badge>)}
+                  {isAction && (p.endedAction ? <Badge tone="toxic">已行动</Badge> : <Badge>待行动</Badge>)}
                 </div>
               </div>
               {isHost && (
                 <div className="text-[11px] text-slate-400 mt-1">
-                  {getRole(p.roleId)?.name} · 负重 {getInventoryWeight(p)}/{p.load} ·
+                  {getRole(p.roleId)?.name} · 在 {p.location ? getRoomLabel(p.location) : "—"} · 负重 {getInventoryWeight(p)}/{p.load} ·
                   {p.inventory.length === 0 ? " 无道具" : " " + Object.entries(counts).map(([id, n]) => `${getItemName(id)}×${n}`).join("、")}
-                  {p.submittedAction ? ` · 去 ${p.submittedAction.toRoom}` : ""}
+                  {p.submittedAction ? ` · 去 ${getRoomLabel(p.submittedAction.toRoom)}` : ""}
+                  {(p.roleUses ?? 0) > 0 ? ` · 技能用 ${p.roleUses}` : ""}
                 </div>
               )}
             </div>
@@ -154,9 +175,11 @@ function PlayersBoard({ room, seated, isHost }: { room: GameRoom; seated: Player
 }
 
 function LogPanel({ room }: { room: GameRoom }) {
-  const logs = [...room.publicLogs].reverse();
+  // §13：仅展示公开日志；行动阶段产生的私密日志（移动/抽卡/技能）不在公共看板出现。
+  const logs = room.publicLogs.filter((l) => l.visibility === "public").reverse();
   return (
     <Card title="公开日志">
+      <p className="text-[11px] text-slate-500 mb-1">行动阶段的移动/抽卡/技能为私密信息，结算后才会公开。</p>
       <div className="space-y-1 max-h-[420px] overflow-y-auto text-sm">
         {logs.length === 0 && <p className="text-slate-500">暂无日志。</p>}
         {logs.map((l) => (
@@ -199,7 +222,7 @@ function PreviewPanel({ room }: { room: GameRoom }) {
   );
 }
 
-function HostConsole({ room, seated, run }: { room: GameRoom; seated: Player[]; run: (fn: (r: GameRoom) => GameRoom) => void }) {
+function HostConsole({ room, seated, run, code }: { room: GameRoom; seated: Player[]; run: (fn: (r: GameRoom) => GameRoom) => void; code: string }) {
   const [logText, setLogText] = useState("");
   const isResolution = room.currentPhase === "RESOLUTION";
   const isOver = room.currentPhase === "GAME_OVER";
@@ -263,11 +286,186 @@ function HostConsole({ room, seated, run }: { room: GameRoom; seated: Player[]; 
       </div>
 
       <h4 className="text-sm font-semibold text-slate-300 mb-2">添加公开日志</h4>
-      <div className="flex gap-2">
+      <div className="flex gap-2 mb-4">
         <input className="select" value={logText} onChange={(e) => setLogText(e.target.value)} placeholder="输入要公开的信息" />
         <Button variant="primary" onClick={() => { if (!logText.trim()) return; run((r) => addPublicLog(r, logText)); setLogText(""); }}>添加</Button>
       </div>
+
+      <TradesAdminPanel room={room} run={run} />
+      <AdvancedCorrectionPanel room={room} seated={seated} run={run} />
+      <SnapshotPanel code={code} />
+      <ExportImportPanel room={room} code={code} />
     </Card>
+  );
+}
+
+/** 房主：待处理交易管理（取消异常交易）。 */
+function TradesAdminPanel({ room, run }: { room: GameRoom; run: (fn: (r: GameRoom) => GameRoom) => void }) {
+  const pending = room.trades.filter((t) => t.status === "pending");
+  const nameOf = (id: string) => room.players.find((p) => p.id === id)?.name ?? id;
+  if (pending.length === 0) return null;
+  return (
+    <details className="mb-3 bg-ink-700 rounded">
+      <summary className="cursor-pointer px-3 py-2 text-sm font-semibold text-slate-300">待处理交易（{pending.length}）</summary>
+      <div className="px-3 pb-3 space-y-1">
+        {pending.map((t) => (
+          <div key={t.id} className="flex items-center justify-between text-xs">
+            <span>{nameOf(t.fromPlayerId)} → {nameOf(t.toPlayerId)}：{[...t.offerItems.map(getItemName), ...(t.offerOrderCard ? ["顺位卡"] : [])].join("、") || "（空）"}</span>
+            <Button className="px-2 py-1 min-h-0" onClick={() => run((r) => cancelTrade(r, t.id))}>取消</Button>
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+/** 房主：高级纠错（位置/基因/道具/顺位/技能次数/毒气/解毒）。 */
+function AdvancedCorrectionPanel({ room, seated, run }: { room: GameRoom; seated: Player[]; run: (fn: (r: GameRoom) => GameRoom) => void }) {
+  return (
+    <details className="mb-3 bg-ink-700 rounded">
+      <summary className="cursor-pointer px-3 py-2 text-sm font-semibold text-slate-300">高级纠错工具</summary>
+      <div className="px-3 pb-3 space-y-3">
+        {/* 毒气楼层 / 解毒 */}
+        <div>
+          <div className="text-xs text-slate-400 mb-1">毒气楼层（点击切换）</div>
+          <div className="flex flex-wrap gap-1">
+            {FLOORS.map((f) => (
+              <button key={f.id} type="button" onClick={() => run((r) => toggleGasFloor(r, f.id))}
+                className={cls("text-xs px-2 py-1 rounded border", room.gasFloors.includes(f.id) ? "bg-toxic/30 border-toxic text-toxic" : "bg-ink-800 border-ink-600")}>
+                {f.label}
+              </button>
+            ))}
+          </div>
+        </div>
+        {/* 逐人纠错 */}
+        {seated.map((p) => (
+          <PlayerCorrectionRow key={p.id} room={room} p={p} run={run} />
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function PlayerCorrectionRow({ room, p, run }: { room: GameRoom; p: Player; run: (fn: (r: GameRoom) => GameRoom) => void }) {
+  const [loc, setLoc] = useState(p.location ?? "");
+  const [force, setForce] = useState(p.force);
+  const [speed, setSpeed] = useState(p.speed);
+  const [load, setLoad] = useState(p.load);
+  const [item, setItem] = useState("");
+  return (
+    <div className="border border-ink-600 rounded p-2 text-xs space-y-2">
+      <div className="font-medium text-slate-200">{p.seatIndex + 1}. {p.name} · {getRole(p.roleId)?.name}</div>
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="text-slate-400">位置</span>
+        <select className="bg-ink-800 border border-ink-600 rounded px-1 py-0.5" value={loc} onChange={(e) => setLoc(e.target.value)}>
+          {ROOMS.map((r) => <option key={r.id} value={r.id}>{getRoomLabel(r.id)}</option>)}
+        </select>
+        <Button className="px-2 py-0.5 min-h-0" onClick={() => run((r) => setPlayerLocation(r, p.id, loc))}>设</Button>
+        <span className="text-slate-400 ml-2">顺位</span>
+        <Button className="px-2 py-0.5 min-h-0" onClick={() => run((r) => setOrderCard(r, p.id, (p.orderCard ?? 0) - 1 || null))}>-</Button>
+        <span>{p.orderCard ?? "—"}</span>
+        <Button className="px-2 py-0.5 min-h-0" onClick={() => run((r) => setOrderCard(r, p.id, (p.orderCard ?? 0) + 1))}>+</Button>
+        {getRole(p.roleId)?.maxUses != null && (
+          <>
+            <span className="text-slate-400 ml-2">技能次数 {p.roleUses ?? 0}</span>
+            <Button className="px-2 py-0.5 min-h-0" onClick={() => run((r) => adjustRoleUses(r, p.id, -1))}>-</Button>
+            <Button className="px-2 py-0.5 min-h-0" onClick={() => run((r) => adjustRoleUses(r, p.id, +1))}>+</Button>
+          </>
+        )}
+      </div>
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="text-slate-400">基因</span>
+        武<input type="number" className="w-12 bg-ink-800 border border-ink-600 rounded px-1" value={force} onChange={(e) => setForce(+e.target.value)} />
+        速<input type="number" className="w-12 bg-ink-800 border border-ink-600 rounded px-1" value={speed} onChange={(e) => setSpeed(+e.target.value)} />
+        负<input type="number" className="w-12 bg-ink-800 border border-ink-600 rounded px-1" value={load} onChange={(e) => setLoad(+e.target.value)} />
+        <Button className="px-2 py-0.5 min-h-0" onClick={() => run((r) => setPlayerGenes(r, p.id, { force, speed, load }))}>设</Button>
+      </div>
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="text-slate-400">道具</span>
+        <select className="bg-ink-800 border border-ink-600 rounded px-1 py-0.5" value={item} onChange={(e) => setItem(e.target.value)}>
+          <option value="">选择…</option>
+          {ITEMS.map((it) => <option key={it.id} value={it.id}>{it.name}</option>)}
+        </select>
+        <Button className="px-2 py-0.5 min-h-0" disabled={!item} onClick={() => run((r) => adjustPlayerItem(r, p.id, item, +1))}>+1</Button>
+        <Button className="px-2 py-0.5 min-h-0" disabled={!item} onClick={() => run((r) => adjustPlayerItem(r, p.id, item, -1))}>-1</Button>
+      </div>
+    </div>
+  );
+}
+
+/** 房主：快照查看与回滚。 */
+function SnapshotPanel({ code }: { code: string }) {
+  const listSnapshots = useGameStore((s) => s.listSnapshots);
+  const rollback = useGameStore((s) => s.rollback);
+  const [snaps, setSnaps] = useState<SnapshotMeta[]>([]);
+  const [msg, setMsg] = useState("");
+
+  const refresh = async () => {
+    try { setSnaps(await listSnapshots(code)); setMsg(""); }
+    catch (e) { setMsg(e instanceof Error ? e.message : String(e)); }
+  };
+  const doRollback = async (i: number) => {
+    if (!window.confirm("确认回滚到该快照？当前进度将被覆盖。")) return;
+    try { await rollback(code, i); setMsg("已回滚。"); await refresh(); }
+    catch (e) { setMsg(e instanceof Error ? e.message : String(e)); }
+  };
+
+  return (
+    <details className="mb-3 bg-ink-700 rounded">
+      <summary className="cursor-pointer px-3 py-2 text-sm font-semibold text-slate-300">阶段快照 / 回滚</summary>
+      <div className="px-3 pb-3 space-y-2">
+        <Button className="px-2 py-1 min-h-0" onClick={refresh}>刷新快照列表</Button>
+        {msg && <p className="text-xs text-amber-300">{msg}</p>}
+        {snaps.length === 0 ? <p className="text-xs text-slate-500">点击刷新查看最近快照（每次阶段切换自动保存）。</p> : (
+          <div className="space-y-1">
+            {snaps.map((s) => (
+              <div key={s.index} className="flex items-center justify-between text-xs">
+                <span>{s.label} · {new Date(s.createdAt).toLocaleTimeString()}</span>
+                <Button className="px-2 py-0.5 min-h-0" onClick={() => doRollback(s.index)}>回滚到此</Button>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </details>
+  );
+}
+
+/** 房主：导出/导入房间 JSON。 */
+function ExportImportPanel({ room, code }: { room: GameRoom; code: string }) {
+  const apply = useGameStore((s) => s.apply);
+  const [text, setText] = useState("");
+  const [msg, setMsg] = useState("");
+
+  const doExport = () => {
+    const json = JSON.stringify(room, null, 2);
+    setText(json);
+    navigator.clipboard?.writeText(json).catch(() => {});
+    setMsg("已导出到文本框并复制到剪贴板。");
+  };
+  const doImport = () => {
+    try {
+      const parsed = JSON.parse(text) as GameRoom;
+      if (parsed.roomCode !== room.roomCode) throw new Error("房间码不匹配，拒绝导入。");
+      apply(code, () => parsed);
+      setMsg("已导入并应用。");
+    } catch (e) {
+      setMsg("导入失败：" + (e instanceof Error ? e.message : String(e)));
+    }
+  };
+
+  return (
+    <details className="mb-1 bg-ink-700 rounded">
+      <summary className="cursor-pointer px-3 py-2 text-sm font-semibold text-slate-300">导出 / 导入房间状态</summary>
+      <div className="px-3 pb-3 space-y-2">
+        <div className="flex gap-2">
+          <Button className="px-2 py-1 min-h-0" onClick={doExport}>导出当前状态</Button>
+          <Button className="px-2 py-1 min-h-0" variant="danger" onClick={doImport} disabled={!text.trim()}>导入并覆盖</Button>
+        </div>
+        {msg && <p className="text-xs text-amber-300">{msg}</p>}
+        <textarea className="w-full h-32 bg-ink-800 border border-ink-600 rounded p-2 text-[11px] font-mono" value={text} onChange={(e) => setText(e.target.value)} placeholder="房间状态 JSON" />
+      </div>
+    </details>
   );
 }
 
@@ -287,6 +485,7 @@ function RankingPanel({ room }: { room: GameRoom }) {
                 {p.status === "shadow" && <Badge tone="shadow">暗影</Badge>}
               </span>
               <span className="flex items-center gap-3">
+                <span className="text-slate-400 text-xs">武{p.force}/速{p.speed}/负{p.load}</span>
                 <span className="text-red-300">❤ {p.hp}</span>
                 <span className="text-gold">{r.points} 分</span>
               </span>
@@ -294,7 +493,7 @@ function RankingPanel({ room }: { room: GameRoom }) {
           );
         })}
       </div>
-      <p className="text-[11px] text-slate-500 mt-2">排名按规则 17.3/17.4；最终金条已自动兑换为生命值。</p>
+      <p className="text-[11px] text-slate-500 mt-2">排名按规则 17.3/17.4；最终金条已自动兑换为生命值。完整事件见下方公开日志，可在房主控制台导出房间状态作复盘。</p>
     </Card>
   );
 }

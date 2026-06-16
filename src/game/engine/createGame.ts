@@ -11,6 +11,7 @@ export function makeEmptyPlayer(seatIndex: number): Player {
     id: uid("p_"),
     name: "",
     seatIndex,
+    preferredRoleId: null,
     roleId: null,
     hp: 10,
     maxHp: 10,
@@ -47,6 +48,10 @@ export function createGame(opts: CreateGameOptions): GameRoom {
   const host = makeEmptyPlayer(0);
   host.name = opts.hostName.trim() || "房主";
 
+  // 固定 9 人局：房主占 0 号座，其余 8 个空座等待加入。
+  const players: Player[] = [host];
+  for (let i = 1; i < MAX_SEATS; i++) players.push(makeEmptyPlayer(i));
+
   const room: GameRoom = {
     id: uid("room_"),
     roomCode,
@@ -54,12 +59,14 @@ export function createGame(opts: CreateGameOptions): GameRoom {
     currentRound: 0,
     currentPhase: "LOBBY",
     hostPlayerId: host.id,
-    players: [host],
+    players,
     gasFloors: [],
     clearedGasRooms: [],
+    closedRooms: [],
     roomInventories: {},
     consumedPile: {},
     airdrops: [],
+    trades: [],
     resolutionPreview: null,
     publicLogs: [],
     devMode: opts.devMode ?? false,

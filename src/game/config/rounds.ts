@@ -20,7 +20,7 @@ export const FOOD_WATER_START_ROUND = 2;
 /** 停机坪空投表（文字）。来源：规则手册 14.2。 */
 export const airdropByRound: Record<number, string> = {
   1: "2 刀",
-  2: "2 酒",
+  2: "2 果汁",
   3: "1 水 + 1 粮食",
   4: "1 手枪",
   5: "1 肾上腺素",
@@ -30,7 +30,7 @@ export const airdropByRound: Record<number, string> = {
 /** 停机坪空投表（结构化，itemId -> 数量）。来源：规则手册 14.2。 */
 export const airdropItemsByRound: Record<number, Inventory> = {
   1: { knife: 2 },
-  2: { wine: 2 },
+  2: { juice: 2 },
   3: { water: 1, food: 1 },
   4: { pistol: 1 },
   5: { adrenaline: 1 },

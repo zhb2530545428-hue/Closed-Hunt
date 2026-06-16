@@ -4,11 +4,11 @@ import { useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import { useGameStore } from "@/store/useGameStore";
-import { useEnsureHydrated } from "@/components/store-hooks";
+import { isRemoteMode } from "@/store/sync";
+import { useEnsureHydrated, useWatchRoom } from "@/components/store-hooks";
 import { Button, Card, Badge, cls } from "@/components/ui";
 import type { GameRoom, Player } from "@/game/types";
 import {
-  joinGame,
   updatePlayerSetup,
   randomRole,
   toggleReady,
@@ -26,16 +26,20 @@ export default function LobbyPage() {
   const code = (params.roomCode as string)?.toUpperCase();
   const router = useRouter();
   const hydrated = useEnsureHydrated();
+  useWatchRoom(code);
 
   const room = useGameStore((s) => s.rooms[code]);
   const myId = useGameStore((s) => s.identities[code]);
   const apply = useGameStore((s) => s.apply);
+  const joinSeat = useGameStore((s) => s.joinSeat);
   const setIdentity = useGameStore((s) => s.setIdentity);
+  const lastError = useGameStore((s) => s.lastError);
 
   const [error, setError] = useState("");
+  const remote = isRemoteMode();
 
   if (!hydrated) return <Loading />;
-  if (!room) return <NotFound code={code} />;
+  if (!room) return <NotFound code={code} remote={remote} />;
 
   if (room.currentPhase !== "LOBBY") {
     return (
@@ -76,6 +80,15 @@ export default function LobbyPage() {
     navigator.clipboard?.writeText(url).catch(() => {});
   };
 
+  const handleJoin = async (seatIndex: number, name: string) => {
+    setError("");
+    try {
+      await joinSeat(code, seatIndex, name);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "加入失败。");
+    }
+  };
+
   return (
     <main className="max-w-4xl mx-auto px-4 py-6">
       <header className="flex flex-wrap items-center justify-between gap-2 mb-4">
@@ -92,25 +105,35 @@ export default function LobbyPage() {
         </div>
       </header>
 
-      {error && <ErrorBar msg={error} />}
+      {(error || lastError) && <ErrorBar msg={error || lastError || ""} />}
 
-      <Card title="我控制的玩家" className="mb-4">
-        <p className="text-xs text-slate-400 mb-2">
-          v0.1 本地热座：可在此屏直接填写多个座位用于测试；选择身份后「我的面板」将以该玩家视角显示。
-        </p>
-        <div className="flex flex-wrap gap-2">
-          {room.players.filter((p) => p.name).map((p) => (
-            <Button
-              key={p.id}
-              variant={p.id === myId ? "gold" : "ghost"}
-              onClick={() => setIdentity(code, p.id)}
-            >
-              {p.seatIndex + 1}. {p.name}
-              {p.id === room.hostPlayerId ? "（房主）" : ""}
-            </Button>
-          ))}
-        </div>
-      </Card>
+      {remote ? (
+        <Card title="我的身份" className="mb-4">
+          <p className="text-sm text-slate-300">
+            {myId
+              ? <>你控制：<span className="text-gold">{room.players.find((p) => p.id === myId)?.name ?? "（座位）"}</span>{myId === room.hostPlayerId ? "（房主）" : ""}。刷新或换设备打开本链接可自动重连。</>
+              : "你尚未加入。请在下方空座位填写昵称加入。"}
+          </p>
+        </Card>
+      ) : (
+        <Card title="我控制的玩家" className="mb-4">
+          <p className="text-xs text-slate-400 mb-2">
+            本地热座：可在此屏直接填写多个座位用于测试；选择身份后「我的面板」将以该玩家视角显示。
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {room.players.filter((p) => p.name).map((p) => (
+              <Button
+                key={p.id}
+                variant={p.id === myId ? "gold" : "ghost"}
+                onClick={() => setIdentity(code, p.id)}
+              >
+                {p.seatIndex + 1}. {p.name}
+                {p.id === room.hostPlayerId ? "（房主）" : ""}
+              </Button>
+            ))}
+          </div>
+        </Card>
+      )}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mb-6">
         {room.players.map((p) => (
@@ -120,10 +143,7 @@ export default function LobbyPage() {
             isHostSeat={p.id === room.hostPlayerId}
             isMe={p.id === myId}
             canKick={isHost && p.id !== room.hostPlayerId && !!p.name}
-            onJoin={(name) => {
-              run((r) => joinGame(r, name, p.seatIndex).room);
-              setIdentity(code, p.id);
-            }}
+            onJoin={(name) => handleJoin(p.seatIndex, name)}
             onUpdate={(patch) => run((r) => updatePlayerSetup(r, p.id, patch))}
             onRandomRole={() => run((r) => randomRole(r, p.id))}
             onToggleReady={() => run((r) => toggleReady(r, p.id))}
@@ -176,6 +196,28 @@ function SeatCard({
   const geneSum = player.force + player.speed + player.load;
   const geneOk = isGeneValid({ force: player.force, speed: player.speed, load: player.load });
 
+  // §1：准备阶段角色选择互相不可见——他人座位只显示「已提交/未提交」，不显示具体角色与设置。
+  if (occupied && !isMe) {
+    return (
+      <Card className={cls(player.isReady && "border-toxic/50")}>
+        <div className="flex items-center justify-between mb-2">
+          <span className="font-semibold">
+            {player.seatIndex + 1}. {player.name}
+            {isHostSeat && <span className="text-gold text-xs ml-1">房主</span>}
+          </span>
+          {player.isReady ? <Badge tone="toxic">已准备</Badge> : <Badge>未准备</Badge>}
+        </div>
+        <div className="text-xs text-slate-400 space-y-1">
+          <div>角色：{player.preferredRoleId ? "已选择（保密）" : "未选择"}</div>
+          <div>基因点：{geneOk ? "已分配" : "未完成"}</div>
+          <div>出生房间：{player.location ? "已选择" : "未选择"}</div>
+        </div>
+        <p className="text-[11px] text-slate-500 mt-2">他人的角色在开局统一解析后才会公开。</p>
+        {canKick && <Button variant="danger" className="mt-2" onClick={onKick}>清空</Button>}
+      </Card>
+    );
+  }
+
   if (!occupied) {
     return (
       <Card className={cls("border-dashed", isMe && "ring-1 ring-gold")}>
@@ -218,11 +260,11 @@ function SeatCard({
         onChange={(e) => onUpdate({ name: e.target.value })}
       />
 
-      <label className="block text-xs text-slate-400 mb-1">职业</label>
+      <label className="block text-xs text-slate-400 mb-1">想选的角色（保密，撞车时开局统一抽取）</label>
       <div className="flex gap-1 mb-1">
         <select
           className="flex-1 bg-ink-700 border border-ink-600 rounded px-2 py-1 text-sm"
-          value={player.roleId ?? ""}
+          value={player.preferredRoleId ?? ""}
           onChange={(e) => onUpdate({ roleId: e.target.value || null })}
         >
           <option value="">未选择</option>
@@ -232,8 +274,8 @@ function SeatCard({
         </select>
         <Button onClick={onRandomRole} className="px-2">随机</Button>
       </div>
-      {player.roleId && (
-        <p className="text-[11px] text-slate-400 mb-2 leading-snug">{getRole(player.roleId)?.skill}</p>
+      {player.preferredRoleId && (
+        <p className="text-[11px] text-slate-400 mb-2 leading-snug">{getRole(player.preferredRoleId)?.skill}</p>
       )}
 
       <label className="block text-xs text-slate-400 mb-1">
@@ -295,11 +337,13 @@ function Loading() {
   return <main className="max-w-md mx-auto px-4 py-10 text-center text-slate-400">加载中…</main>;
 }
 
-function NotFound({ code }: { code: string }) {
+function NotFound({ code, remote }: { code: string; remote: boolean }) {
   return (
     <main className="max-w-md mx-auto px-4 py-10 text-center space-y-3">
       <p className="text-slate-300">未找到房间 {code}。</p>
-      <p className="text-xs text-slate-500">房间数据仅存于创建它的浏览器内。</p>
+      <p className="text-xs text-slate-500">
+        {remote ? "房间码可能有误，或房间已结束。" : "本地模式下房间数据仅存于创建它的浏览器内。"}
+      </p>
       <Link href="/" className="text-blue-400 underline">返回首页</Link>
     </main>
   );

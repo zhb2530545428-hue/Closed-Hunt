@@ -27,14 +27,20 @@ export interface PlayerRoundAction {
   usedSpecialMove?: string[];
   /** 本轮移动/房间触发的效果说明（如「经过激光室」） */
   triggeredEffects?: string[];
-  /** 该提交已造成的激光室即时伤害（用于改提交时回退，避免重复扣血） */
-  laserDamageApplied?: number;
   /** 暗影不投票时为 null */
   gasVoteFloor: string | null;
   /** 房间功能选择（轻量 key，如 "gene" / "control_vote10"） */
   roomAction?: string;
+  /** 本轮该行动是否已在目标房间常规抽过一次卡（规则 7.5：每次行动只能抽一次） */
+  hasDrawnFromRoom?: boolean;
+  /** 本次抽卡所在房间 */
+  drawnRoomId?: string;
+  /** 本次抽到的道具 id（私密，仅本人可见；不写入公共日志） */
+  privateDrawResult?: string[];
   /** 本轮声明使用的道具 id（药片/酒/肾上腺素等），结算时处理 */
   useItems?: string[];
+  /** 本轮声明的职业主动技能（移动阶段，v1.0） */
+  roleSkill?: RoleSkillInput;
   /** 火箭筒袭击目标房间 */
   rocketTargetRoom?: string;
   /** 水粮上交计划（第 2 轮起） */
@@ -44,10 +50,36 @@ export interface PlayerRoundAction {
   submittedAt: string;
 }
 
+/** 职业主动技能声明（移动阶段提交，结算或落位时生效）。来源：规则手册 3.2。 */
+export interface RoleSkillInput {
+  /** 技能类型：charm/forecast/chemist_minus/chemist_plus/gift/hound/hacker_close/hacker_func/track */
+  type: string;
+  /** 目标玩家（催眠/跟踪/赠予/死亡预告等） */
+  targetPlayerIds?: string[];
+  /** 目标房间（催眠强制前往 / 化学家解毒房间 / 猎犬抽卡房间 / 黑客关闭房间） */
+  targetRoom?: string;
+  /** 慈善家赠出的道具 id */
+  giveItemId?: string;
+  /** 黑客三选一功能：gene/control/operate */
+  funcChoice?: string;
+  /** 饮品师果汁使用（单瓶兼容旧版）：可选的 3 个骰面（1-6），结算时在其中随机取 1 */
+  diceFaces?: number[];
+  /**
+   * 饮品师多瓶果汁分配（规则 3.2）：使用 N 瓶果汁就有 N 个分配，每瓶独立目标 + 各自 3 骰面。
+   * 长度应等于本轮使用的果汁数量；目标可重复或为不同玩家。
+   */
+  juiceAssignments?: { targetPlayerId: string; diceFaces?: number[] }[];
+  /** 黑客操作室重新分配基因 / 操作室目标分配 */
+  genes?: { force: number; speed: number; load: number };
+}
+
 export interface Player {
   id: string;
   name: string;
   seatIndex: number;
+  /** 准备阶段玩家私下选择的「想要角色」（互相不可见，撞车时统一抽取，规则见 v1.0.1 §1） */
+  preferredRoleId: string | null;
+  /** 最终分配的角色（撞车解析后落定；开局前为 null） */
   roleId: string | null;
   hp: number;
   maxHp: number;
@@ -83,7 +115,31 @@ export interface Player {
   /** 上一轮结束时生命值（全员暗影排名用，规则 17.4） */
   lastRoundHp?: number;
 
+  // —— 职业运行时（v1.0，规则 3.2） ——
+  /** 整局技能已使用次数（限次职业用） */
+  roleUses?: number;
+  /** 病毒携带者叠加在本玩家身上的感染层数（公示） */
+  infection?: number;
+  /** 已被催眠过（每人整局限 1 次） */
+  charmedDone?: boolean;
+  /** 已被跟踪过（每人整局限 1 次） */
+  trackedDone?: boolean;
+  /** 已被慈善家赠予过（每人整局限 1 次） */
+  giftedDone?: boolean;
+  /** 本轮被催眠强制前往的房间 */
+  forcedRoom?: string | null;
+  /** 结算阶段待恢复生命（催眠师/预言家技能产生） */
+  roleHealPending?: number;
+  /** 待公开分配的自由基因点（预言家技能产生） */
+  pendingGenePoints?: number;
+  /** 本轮被预言家死亡预告（结算变暗影时触发预言家收益） */
+  forecastedBy?: string[];
+  /** 多动作职业（黑客）整局已使用的行动种类：close/gene/control/operate */
+  roleActionsUsed?: string[];
+
   isReady: boolean;
+  /** 本轮是否已「结束行动」整轮锁定（不可再修改/抽卡）。每轮重置。规则见 v1.0.1 §7 */
+  endedAction?: boolean;
   submittedAction: PlayerRoundAction | null;
 }
 
@@ -124,6 +180,26 @@ export interface ResolutionPreview {
   generatedAt: string;
 }
 
+/** 自由阶段交易（规则 6.3）。仅可交易道具卡与顺位卡。 */
+export interface Trade {
+  id: string;
+  round: number;
+  fromPlayerId: string;
+  toPlayerId: string;
+  /** 发起方给出的道具 id 列表 */
+  offerItems: string[];
+  /** 发起方给出顺位卡 */
+  offerOrderCard: boolean;
+  /** 发起方索取对方的道具 id 列表（双向交易，可空） */
+  requestItems: string[];
+  /** 发起方索取对方顺位卡 */
+  requestOrderCard: boolean;
+  note?: string;
+  status: "pending" | "accepted" | "rejected" | "cancelled";
+  createdAt: string;
+  resolvedAt?: string;
+}
+
 /** 一份停机坪空投 */
 export interface AirdropPile {
   round: number;
@@ -144,6 +220,8 @@ export interface GameRoom {
   gasFloors: string[];
   /** 已被控制室解除毒气的房间 id 列表 */
   clearedGasRooms: string[];
+  /** 本轮被黑客关闭功能的房间 id 列表（不能触发房间效果/抽卡） */
+  closedRooms: string[];
 
   /** 房间库存：roomId -> 库存 */
   roomInventories: Record<string, Inventory>;
@@ -151,6 +229,9 @@ export interface GameRoom {
   consumedPile: Inventory;
   /** 停机坪累积空投 */
   airdrops: AirdropPile[];
+
+  /** 自由阶段交易列表（含历史） */
+  trades: Trade[];
 
   /** 当前轮结算预览（房主生成后、确认前存在） */
   resolutionPreview: ResolutionPreview | null;

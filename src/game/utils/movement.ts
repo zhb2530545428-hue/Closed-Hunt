@@ -202,6 +202,28 @@ function buildPreviewFromVisit(
   };
 }
 
+/**
+ * 仅沿普通相邻边的最短步数（不使用绳索/暗影/传送等捷径）。
+ * 用于催眠师「5 步内、无视速度、不能使用捷径」的可达性判定。返回步数或 null（不可达）。
+ */
+export function normalStepDistance(from: string, to: string): number | null {
+  if (!getNode(from) || !getNode(to)) return null;
+  if (from === to) return 0;
+  const visited = new Map<string, number>([[from, 0]]);
+  const queue = [from];
+  while (queue.length) {
+    const u = queue.shift()!;
+    const d = visited.get(u)!;
+    for (const n of getNeighbors(u)) {
+      if (visited.has(n)) continue;
+      if (n === to) return d + 1;
+      visited.set(n, d + 1);
+      queue.push(n);
+    }
+  }
+  return null;
+}
+
 /** 路径是否触发激光（存活玩家经过/停留 102） */
 export function pathTriggersLaser(path: string[] | undefined, status: PlayerStatus): boolean {
   if (!path || status === "shadow") return false;

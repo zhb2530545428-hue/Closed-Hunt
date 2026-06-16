@@ -4,6 +4,7 @@ import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useGameStore } from "@/store/useGameStore";
+import { isRemoteMode } from "@/store/sync";
 import { useEnsureHydrated } from "@/components/store-hooks";
 import { Button, Card } from "@/components/ui";
 
@@ -17,17 +18,29 @@ export default function HomePage() {
   const [joinCode, setJoinCode] = useState("");
   const [devMode, setDevMode] = useState(false);
   const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const remote = isRemoteMode();
 
-  const handleCreate = () => {
+  const handleCreate = async () => {
     if (!hostName.trim()) return setError("请先填写房主昵称。");
-    const code = createRoom(hostName.trim(), devMode);
-    router.push(`/room/${code}`);
+    setError("");
+    setBusy(true);
+    try {
+      const code = await createRoom(hostName.trim(), devMode);
+      router.push(`/room/${code}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "创建失败。");
+      setBusy(false);
+    }
   };
 
   const handleJoin = () => {
     const code = joinCode.trim().toUpperCase();
     if (!code) return setError("请输入房间码。");
-    if (hydrated && !rooms[code]) return setError("房间码不存在（房间需在同一浏览器/设备内创建）。");
+    // 远程模式由房间页向服务端校验是否存在；本地模式校验本机是否有该房间
+    if (!remote && hydrated && !rooms[code]) {
+      return setError("房间码不存在（本地模式下房间仅存于创建它的浏览器内）。");
+    }
     router.push(`/room/${code}`);
   };
 
@@ -35,7 +48,7 @@ export default function HomePage() {
     <main className="max-w-md mx-auto px-4 py-10">
       <div className="text-center mb-8">
         <h1 className="text-4xl font-black tracking-widest text-blood">禁闭逃杀</h1>
-        <p className="text-slate-400 mt-2 text-sm">电子版 v0.1 · 9 人局秘密移动生存博弈</p>
+        <p className="text-slate-400 mt-2 text-sm">电子版 v1.0 · 9 人局秘密移动生存博弈</p>
       </div>
 
       {error && (
@@ -61,8 +74,8 @@ export default function HomePage() {
           />
           开发调试模式（允许少于 9 人开始）
         </label>
-        <Button variant="primary" className="w-full" onClick={handleCreate}>
-          创建房间
+        <Button variant="primary" className="w-full" onClick={handleCreate} disabled={busy}>
+          {busy ? "创建中…" : "创建房间"}
         </Button>
       </Card>
 
@@ -87,8 +100,11 @@ export default function HomePage() {
       </div>
 
       <p className="text-xs text-slate-500 mt-8 text-center leading-relaxed">
-        v0.1 为本地原型：房间数据存于本机 localStorage，<br />
-        同一台电脑可开多个浏览器标签页分别作为不同玩家实时同游。
+        {remote ? (
+          <>真实多人模式：任何设备打开邀请链接即可加入，<br />刷新可自动重连座位。</>
+        ) : (
+          <>本地模式（未配置 Supabase）：房间数据仅存于本机 localStorage，<br />同一浏览器多标签页可热座测试。配置环境变量后即开启真实多人。</>
+        )}
       </p>
     </main>
   );

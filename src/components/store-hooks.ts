@@ -12,3 +12,14 @@ export function useEnsureHydrated(): boolean {
   }, [hydrated, hydrate]);
   return hydrated;
 }
+
+/** 进入某房间页时开始同步（远程轮询 / 本地载入），离开时停止。 */
+export function useWatchRoom(code: string): void {
+  const hydrated = useGameStore((s) => s.hydrated);
+  const watchRoom = useGameStore((s) => s.watchRoom);
+  useEffect(() => {
+    if (!hydrated || !code) return;
+    const stop = watchRoom(code);
+    return stop;
+  }, [hydrated, code, watchRoom]);
+}
