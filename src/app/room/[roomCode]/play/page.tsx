@@ -22,6 +22,8 @@ import {
   endTurn,
   currentTurnPlayerId,
   reviseAction,
+  skipDraw,
+  chooseGiftGene,
 } from "@/game/engine";
 import type { RoleSkillInput } from "@/game/types";
 import { getInventoryWeight, getCarryLimit, isOverweight } from "@/game/inventory";
@@ -29,10 +31,11 @@ import { buildMoveContext, getReachableRooms, validateMove, normalStepDistance, 
 import { getRole, roleMaxUses } from "@/game/config/roles";
 import { getItemName } from "@/game/config/items";
 import { getRoomLabel, getRoom, ROOMS } from "@/game/config/rooms";
-import { getRoomFunction, getDrawLimit, isDrawRoom } from "@/game/config/roomFunctions";
+import { getRoomFunction, getDrawLimit, isDrawRoom, isRoomFunctionAvailable } from "@/game/config/roomFunctions";
 import { FLOORS } from "@/game/config/floors";
 import { PHASE_INFO } from "@/game/config/phases";
-import { FOOD_WATER_START_ROUND } from "@/game/config/rounds";
+import { TOTAL_ROUNDS, formatRoundLabel } from "@/game/config/rounds";
+import { roleWithNick } from "@/game/utils/names";
 
 const USABLE = ["pill", "juice", "adrenaline"];
 
@@ -44,9 +47,9 @@ const SPECIAL_LABEL: Record<string, string> = {
   shadow: "暗影上下楼",
 };
 
-/** 玩家展示标签：P{座位} 昵称｜角色名（§6 玩家界面显示 ID + 角色名称）。 */
+/** 玩家展示标签：优先角色名（昵称辅助）。v1.0.2 §6：对局内减少玩家 ID 干扰。 */
 function playerLabel(p: Player): string {
-  return `P${p.seatIndex + 1} ${p.name}｜${getRole(p.roleId)?.name ?? "?"}`;
+  return roleWithNick(p);
 }
 
 export default function PlayPage() {
@@ -136,7 +139,7 @@ function PrivatePanel({ room, me, run }: { room: GameRoom; me: Player; run: (fn:
     <>
       <Card title="本轮状态" className="mb-4">
         <div className="grid grid-cols-2 gap-y-2 text-sm">
-          <Stat label="轮次" value={`第 ${room.currentRound} 轮`} />
+          <Stat label="轮次" value={formatRoundLabel(room.currentRound)} />
           <Stat label="阶段" value={phase?.label ?? room.currentPhase} />
           <Stat label="职业" value={getRole(me.roleId)?.name ?? "—"} />
           <Stat label="状态" value={isShadow ? "暗影" : me.reviveProtectedRound === room.currentRound ? "复活保护" : "存活"} tone={isShadow ? "shadow" : "toxic"} />
@@ -176,6 +179,8 @@ function PrivatePanel({ room, me, run }: { room: GameRoom; me: Player; run: (fn:
       )}
 
       <RoleStatusCard me={me} />
+
+      {me.pendingGiftFrom && <GiftGeneChoiceCard room={room} me={me} run={run} />}
 
       {room.currentPhase === "FREE" && <TradePanel room={room} me={me} run={run} />}
 
@@ -231,16 +236,29 @@ function PrivatePanel({ room, me, run }: { room: GameRoom; me: Player; run: (fn:
   );
 }
 
-/** 本轮私密记录（§13）：仅本人可见的移动/抽卡/技能等信息，结算后才会公开到公共日志。 */
+/**
+ * 私密记录（§4 B / §13）：仅本人可见的移动/抽卡/技能信息，以及上一轮结算的私密结果
+ * （如自己被黑客锁房间、果汁/技能私密结果），结算后才对本人展示，不进公共日志。
+ */
 function PrivateLogCard({ room, me }: { room: GameRoom; me: Player }) {
   const logs = room.publicLogs
-    .filter((l) => l.visibility === "private" && l.playerId === me.id && l.round === room.currentRound)
+    .filter(
+      (l) =>
+        l.visibility === "private" &&
+        l.playerId === me.id &&
+        (l.round === room.currentRound || l.round === room.currentRound - 1)
+    )
     .reverse();
   if (logs.length === 0) return null;
   return (
-    <Card title="本轮私密记录（仅你可见）" className="mt-4">
+    <Card title="私密记录（仅你可见：本轮 + 上一轮结算）" className="mt-4">
       <div className="space-y-1 text-sm max-h-48 overflow-y-auto">
-        {logs.map((l) => <div key={l.id} className="text-slate-300">{l.message}</div>)}
+        {logs.map((l) => (
+          <div key={l.id} className="text-slate-300">
+            <span className="text-slate-500 text-xs mr-2">[{formatRoundLabel(l.round)}]</span>
+            {l.message}
+          </div>
+        ))}
       </div>
     </Card>
   );
@@ -270,7 +288,6 @@ function ActionArea({
   setToRoom: (id: string) => void;
 }) {
   const submitted = me.submittedAction;
-  const needWaterFood = room.currentRound >= FOOD_WATER_START_ROUND;
 
   const [gasVoteFloor, setGasVoteFloor] = useState(submitted?.gasVoteFloor ?? "");
   const [roomAction, setRoomAction] = useState(submitted?.roomAction ?? "");
@@ -290,6 +307,13 @@ function ActionArea({
   );
   const destFn = toRoom ? getRoomFunction(toRoom) : undefined;
   const hasRocket = me.inventory.includes("rocket");
+  // §8：饮品师按瓶数分配目标，未为每瓶选择目标前不可确认。
+  const juiceUseCount = useCounts["juice"] ?? 0;
+  const juiceTargetsIncomplete =
+    me.roleId === "bartender" &&
+    juiceUseCount > 0 &&
+    roleSkill?.type === "juice" &&
+    (roleSkill.juiceAssignments ?? []).slice(0, juiceUseCount).some((a) => !a.targetPlayerId);
 
   const buildUseItems = (): string[] => {
     const list: string[] = [];
@@ -318,169 +342,249 @@ function ActionArea({
     rooms: reachable.filter((r) => getRoomFloor(r.roomId) === f.id),
   })).filter((g) => g.rooms.length > 0);
 
+  // §7.1：水粮为「预交下一轮」——最后一轮（第6轮）后无下一轮，故不再询问。
+  const showWaterFoodPrepay = !isShadow && room.currentRound < TOTAL_ROUNDS;
+  const nextRoundLabel = formatRoundLabel(room.currentRound + 1);
+  const gasMissing = !isShadow && !gasVoteFloor;
+
+  // §7.2：到达可抽卡房间必须先处理抽卡（抽卡或放弃）才能进入「结算准备区」。
+  // 抽卡期间待上交的水粮 / 待使用的道具仍占负重，不能提前交出后再多抽——故按此顺序门控。
+  const drawTarget = submitted?.toRoom;
+  const drawClosed = drawTarget ? !isRoomFunctionAvailable(drawTarget, room) : false;
+  const drawStock = drawTarget
+    ? Object.values(room.roomInventories[drawTarget] ?? {}).reduce((a, b) => a + b, 0)
+    : 0;
+  const mustHandleDraw =
+    !!submitted &&
+    !drawClosed &&
+    !!drawTarget &&
+    isDrawRoom(drawTarget) &&
+    drawStock > 0 &&
+    !submitted.hasDrawnFromRoom &&
+    !submitted.drawSkipped;
+
+  // 行动末尾统一提交：道具使用 / 火箭筒 / 水粮预交 / 毒气投票 /（饮品师）果汁分配。
+  const revisePatch = () => ({
+    useItems: buildUseItems(),
+    rocketTargetRoom: rocketTarget || undefined,
+    submitWater,
+    submitFood,
+    gasVoteFloor: isShadow ? null : gasVoteFloor || null,
+    roleSkill: me.roleId === "bartender" ? roleSkill : undefined,
+  });
+
+  // §7.2 行动 UI 顺序：① 身份（上方）② 位置/速度/可达 ③ 选择并确认移动
+  // ④ 抽卡 ⑤ 抽到结果 ⑥ 背包更新 ⑦~⑩ 下一轮准备（水/粮/药/果汁/肾上腺素，0 也显示禁用）
+  // ⑪ 毒气投票 ⑫ 黄色结束行动。各区块顺次向下出现，确认移动后不跳回顶部。
+  const usableLabel: Record<string, string> = {
+    pill: "药片（本轮结算回血）",
+    juice: "果汁（本轮结算掷骰）",
+    adrenaline: "肾上腺素（下一轮生效）",
+  };
+
   return (
     <div className="space-y-4">
-      {!submitted && (
+      {!submitted ? (
         <>
-      <Field label={`目标房间（当前位置 ${me.location ? getRoomLabel(me.location) : "—"}，速度 ${me.speed}，必须移动）`}>
-        {reachable.length === 0 ? (
-          <p className="text-sm text-amber-300">没有可到达的房间（请检查速度或地图连接）。</p>
-        ) : (
-          <div className="space-y-2">
-            {reachByFloor.map((g) => (
-              <div key={g.floor}>
-                <div className="text-[11px] text-slate-500 mb-1">{g.floor}</div>
-                <div className="flex flex-wrap gap-1">
-                  {g.rooms.map((r) => (
-                    <button
-                      key={r.roomId}
-                      type="button"
-                      onClick={() => { setToRoom(r.roomId); setRoomAction(""); }}
-                      className={cls(
-                        "text-xs px-2 py-1 rounded border",
-                        toRoom === r.roomId ? "bg-gold/30 border-gold text-gold" : "bg-ink-700 border-ink-600 hover:brightness-125"
-                      )}
-                    >
-                      {getRoomLabel(r.roomId)}
-                      <span className="text-slate-500 ml-1">{r.distance}步</span>
-                      {r.specialMoves.length > 0 && <span className="text-toxic ml-1">特</span>}
-                    </button>
-                  ))}
-                </div>
+          {/* 步骤 2-3：选择并确认移动目标 */}
+          <Field label={`目标房间（当前位置 ${me.location ? getRoomLabel(me.location) : "—"}，速度 ${me.speed}，必须移动）`}>
+            {reachable.length === 0 ? (
+              <p className="text-sm text-amber-300">没有可到达的房间（请检查速度或地图连接）。</p>
+            ) : (
+              <div className="space-y-2">
+                {reachByFloor.map((g) => (
+                  <div key={g.floor}>
+                    <div className="text-[11px] text-slate-500 mb-1">{g.floor}</div>
+                    <div className="flex flex-wrap gap-1">
+                      {g.rooms.map((r) => (
+                        <button
+                          key={r.roomId}
+                          type="button"
+                          onClick={() => { setToRoom(r.roomId); setRoomAction(""); }}
+                          className={cls(
+                            "text-xs px-2 py-1 rounded border",
+                            toRoom === r.roomId ? "bg-gold/30 border-gold text-gold" : "bg-ink-700 border-ink-600 hover:brightness-125"
+                          )}
+                        >
+                          {getRoomLabel(r.roomId)}
+                          <span className="text-slate-500 ml-1">{r.distance}步</span>
+                          {r.specialMoves.length > 0 && <span className="text-toxic ml-1">特</span>}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ))}
               </div>
-            ))}
-          </div>
-        )}
-      </Field>
+            )}
+          </Field>
 
-      {preview && preview.ok && (
-        <div className="bg-ink-700 border border-ink-600 rounded p-3 text-sm space-y-1">
-          <div className="font-medium text-slate-200">移动预览</div>
-          <div>目标：{getRoomLabel(preview.toRoom)} · 预计 {preview.steps} 步</div>
-          <div className="text-slate-300">路径：{preview.path.map(getRoomLabel).join(" → ")}</div>
-          {preview.specialMoves.length > 0 && (
-            <div className="text-toxic">特殊移动：{Array.from(new Set(preview.specialMoves)).map((m) => SPECIAL_LABEL[m] ?? m).join("、")}</div>
+          {preview && preview.ok && (
+            <div className="bg-ink-700 border border-ink-600 rounded p-3 text-sm space-y-1">
+              <div className="font-medium text-slate-200">移动预览</div>
+              <div>目标：{getRoomLabel(preview.toRoom)} · 预计 {preview.steps} 步</div>
+              <div className="text-slate-300">路径：{preview.path.map(getRoomLabel).join(" → ")}</div>
+              {preview.specialMoves.length > 0 && (
+                <div className="text-toxic">特殊移动：{Array.from(new Set(preview.specialMoves)).map((m) => SPECIAL_LABEL[m] ?? m).join("、")}</div>
+              )}
+              {preview.passesLaser && <div className="text-red-400">⚠ 经过/停留 102 激光室，结算阶段将 -1 生命</div>}
+            </div>
           )}
-          {preview.passesLaser && <div className="text-red-400">⚠ 经过/停留 102 激光室，确认后立即 -1 生命</div>}
-        </div>
-      )}
-      {preview && !preview.ok && <div className="text-sm text-amber-300">{preview.reason}</div>}
+          {preview && !preview.ok && <div className="text-sm text-amber-300">{preview.reason}</div>}
 
-      {!isShadow && destFn && (
-        <Field label={`房间功能（${destFn.name}）`}>
-          <select className="select" value={roomAction} onChange={(e) => setRoomAction(e.target.value)}>
-            <option value="">不使用</option>
-            {toRoom === "201" && <option value="gene">使用基因库：三项 +1</option>}
-            {toRoom === "B101" && <option value="control_vote10">控制室：本轮毒气投票 1 票视为 10 票</option>}
-            {toRoom !== "201" && toRoom !== "B101" && <option value="use">使用：{destFn.name}（结算时由房主核对）</option>}
-          </select>
-          <p className="text-[11px] text-slate-500 mt-1">{destFn.effect}</p>
-        </Field>
-      )}
+          {!isShadow && destFn && (
+            <Field label={`房间功能（${destFn.name}）`}>
+              <select className="select" value={roomAction} onChange={(e) => setRoomAction(e.target.value)}>
+                <option value="">不使用</option>
+                {toRoom === "201" && <option value="gene">使用基因库：三项 +1</option>}
+                {toRoom === "B101" && <option value="control_vote10">控制室：本轮毒气投票 1 票视为 10 票</option>}
+                {toRoom !== "201" && toRoom !== "B101" && <option value="use">使用：{destFn.name}（结算时由房主核对）</option>}
+              </select>
+              <p className="text-[11px] text-slate-500 mt-1">{destFn.effect}</p>
+            </Field>
+          )}
 
-      {isShadow ? (
-        <p className="text-sm text-purple-300">暗影：不投毒气、不用房间功能、不抽道具，仅提交移动终点；可不经楼梯上下楼；经过激光室不受伤害。</p>
+          {/* 移动阶段主动技能（化学家/催眠/预言/慈善/侦探/黑客/猎犬）。饮品师果汁分配在抽卡后的准备区。 */}
+          {!isShadow && me.roleId !== "bartender" && (
+            <RoleSkillField room={room} me={me} value={roleSkill} onChange={setRoleSkill} counts={counts} juiceUseCount={0} />
+          )}
+
+          {isShadow && (
+            <p className="text-sm text-purple-300">暗影：不投毒气、不用房间功能、不抽道具，仅提交移动终点；可不经楼梯上下楼；经过激光室不受伤害。</p>
+          )}
+
+          <Button variant="primary" className="w-full" disabled={!toRoom || over || (preview ? !preview.ok : false)} onClick={doSubmit}>
+            确认移动并提交本轮行动
+          </Button>
+        </>
       ) : (
-        <Field label="毒气投票楼层">
-          <select className="select" value={gasVoteFloor} onChange={(e) => setGasVoteFloor(e.target.value)}>
-            <option value="">请选择</option>
-            {FLOORS.map((f) => (
-              <option key={f.id} value={f.id} disabled={room.gasFloors.includes(f.id)}>
-                {f.label}{room.gasFloors.includes(f.id) ? "（已是毒气楼层）" : ""}
-              </option>
-            ))}
-          </select>
-        </Field>
-      )}
+        <>
+          {/* 已提交移动摘要 */}
+          <div className="text-sm space-y-1">
+            <Badge tone="toxic">已提交移动（不可更改，可继续抽卡/用房间功能）</Badge>
+            <p>目标房间：{getRoomLabel(submitted.toRoom)}（{submitted.stepsUsed ?? "?"} 步）</p>
+            {submitted.path && <p className="text-slate-400">路径：{submitted.path.map(getRoomLabel).join(" → ")}</p>}
+            {submitted.usedSpecialMove && <p className="text-toxic">特殊移动：{submitted.usedSpecialMove.map((m) => SPECIAL_LABEL[m] ?? m).join("、")}</p>}
+            {submitted.triggeredEffects?.some((t) => t.includes("激光")) && (
+              <p className="text-red-300">⚠ 本轮路径经过 102 激光室，结算阶段将 -1 生命（行动阶段不公开）。</p>
+            )}
+          </div>
 
-      {!isShadow && (
-        <RoleSkillField room={room} me={me} value={roleSkill} onChange={setRoleSkill} counts={counts} juiceUseCount={useCounts["juice"] ?? 0} />
-      )}
+          {/* 步骤 4-5：到达后强制处理抽卡，并即时显示抽到内容 */}
+          {!isShadow && <RoomInteractions room={room} me={me} run={run} />}
+
+          {isShadow ? (
+            <p className="text-sm text-purple-300">暗影：仅提交移动终点即可，无需抽卡/投票，等待房主结算或点「结束本轮行动」。</p>
+          ) : mustHandleDraw ? (
+            <p className="text-[11px] text-amber-300 border-t border-ink-600 pt-2">
+              请先在上方完成抽卡（抽卡或选择「放弃抽卡」）。抽卡期间待上交的水粮 / 待使用道具仍占负重，处理完抽卡后才会出现「结算准备区」与毒气投票。
+            </p>
+          ) : (
+            <>
+              {/* 步骤 6：背包 / 负重在上方「本轮状态」卡实时更新 */}
+              <p className="text-[11px] text-slate-500 border-t border-ink-600 pt-2">背包 / 负重已在上方「本轮状态」卡更新。下面是结算准备区。</p>
+
+              {/* 步骤 7-10：下一轮准备区（按钮无论有无道具都显示，数量为 0 时禁用） */}
+              <Field label="结算准备：道具使用（药片/果汁本轮结算生效，肾上腺素下一轮生效）">
+                <div className="space-y-1">
+                  {USABLE.map((id) => {
+                    const have = counts[id] ?? 0;
+                    return (
+                      <div key={id} className="flex items-center gap-2 text-sm">
+                        <span className="w-44">{usableLabel[id]}（持有 {have}）</span>
+                        <input
+                          type="number"
+                          min={0}
+                          max={have}
+                          disabled={have === 0}
+                          className="w-20 bg-ink-700 border border-ink-600 rounded px-2 py-1 disabled:opacity-40"
+                          value={useCounts[id] ?? 0}
+                          onChange={(e) => setUseCounts((s) => ({ ...s, [id]: Math.max(0, Math.min(have, parseInt(e.target.value, 10) || 0)) }))}
+                        />
+                      </div>
+                    );
+                  })}
+                </div>
+              </Field>
+
+              {/* 饮品师果汁分配（按使用瓶数逐瓶选目标）；普通玩家果汁仅对自己 */}
+              {me.roleId === "bartender" ? (
+                <RoleSkillField room={room} me={me} value={roleSkill} onChange={setRoleSkill} counts={counts} juiceUseCount={useCounts["juice"] ?? 0} />
+              ) : (useCounts["juice"] ?? 0) > 0 && (
+                <Field label={`果汁目标（本轮使用 ${useCounts["juice"]} 瓶）`}>
+                  <select className="select" disabled value="self">
+                    <option value="self">对自己使用（普通玩家的果汁仅能对自己使用）</option>
+                  </select>
+                  <p className="text-[11px] text-slate-500 mt-1">结算阶段对自己逐瓶掷骰生效。</p>
+                </Field>
+              )}
+
+              {hasRocket && (
+                <Field label="火箭筒袭击目标房间（可选，本轮结算生效）">
+                  <select className="select" value={rocketTarget} onChange={(e) => setRocketTarget(e.target.value)}>
+                    <option value="">不使用</option>
+                    {FLOORS.map((f) => (
+                      <optgroup key={f.id} label={f.label}>
+                        {roomsOfFloor(f.id).map((rid) => <option key={rid} value={rid}>{getRoomLabel(rid)}</option>)}
+                      </optgroup>
+                    ))}
+                  </select>
+                </Field>
+              )}
+
+              {showWaterFoodPrepay && (
+                <Field label={`是否为下一轮（${nextRoundLabel}）交水粮？（预交 1 水 + 1 粮食，缺则${nextRoundLabel}结算扣血）`}>
+                  <div className="flex gap-4 text-sm">
+                    <label className="flex items-center gap-1">
+                      <input type="checkbox" checked={submitWater} onChange={(e) => setSubmitWater(e.target.checked)} disabled={!counts["water"]} />
+                      交水（持有 {counts["water"] ?? 0}）
+                    </label>
+                    <label className="flex items-center gap-1">
+                      <input type="checkbox" checked={submitFood} onChange={(e) => setSubmitFood(e.target.checked)} disabled={!counts["food"]} />
+                      交粮食（持有 {counts["food"] ?? 0}）
+                    </label>
+                  </div>
+                </Field>
+              )}
+
+              {/* 步骤 11：毒气投票 */}
+              <Field label="毒气投票楼层（必投）">
+                <select className="select" value={gasVoteFloor} onChange={(e) => setGasVoteFloor(e.target.value)}>
+                  <option value="">请选择</option>
+                  {FLOORS.map((f) => (
+                    <option key={f.id} value={f.id} disabled={room.gasFloors.includes(f.id)}>
+                      {f.label}{room.gasFloors.includes(f.id) ? "（已是毒气楼层）" : ""}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+
+              <Button
+                variant="ghost"
+                className="w-full"
+                disabled={juiceTargetsIncomplete}
+                onClick={() => run((r) => reviseAction(r, me.id, revisePatch()))}
+              >
+                保存本轮道具 / 水粮 / 毒气投票
+              </Button>
+            </>
+          )}
+
+          {over && <DiscardPanel me={me} run={run} />}
+
+          {/* 步骤 12：黄色结束行动按钮（必要流程完成后才可点） */}
+          <Button
+            variant="gold"
+            className="w-full"
+            disabled={over || gasMissing || juiceTargetsIncomplete || mustHandleDraw}
+            onClick={() => run((r) => endTurn(isShadow ? r : reviseAction(r, me.id, revisePatch()), me.id))}
+          >
+            结束本轮行动（结束后不可更改，轮到下一顺位）
+          </Button>
+          {over && <p className="text-[11px] text-red-300">超重时无法结束行动，请先丢弃至不超过负重。</p>}
+          {mustHandleDraw && <p className="text-[11px] text-amber-300">请先处理抽卡（抽卡或放弃）再结束行动。</p>}
+          {!mustHandleDraw && gasMissing && <p className="text-[11px] text-amber-300">请先完成毒气投票再结束行动。</p>}
         </>
       )}
-
-      {!isShadow && USABLE.some((id) => counts[id]) && (
-        <Field label="本轮使用道具（结算阶段生效）">
-          <div className="space-y-1">
-            {USABLE.filter((id) => counts[id]).map((id) => (
-              <div key={id} className="flex items-center gap-2 text-sm">
-                <span className="w-28">{getItemName(id)}（持有 {counts[id]}）</span>
-                <input type="number" min={0} max={counts[id]} className="w-20 bg-ink-700 border border-ink-600 rounded px-2 py-1"
-                  value={useCounts[id] ?? 0}
-                  onChange={(e) => setUseCounts((s) => ({ ...s, [id]: Math.max(0, Math.min(counts[id], parseInt(e.target.value, 10) || 0)) }))} />
-              </div>
-            ))}
-          </div>
-        </Field>
-      )}
-
-      {!isShadow && hasRocket && (
-        <Field label="火箭筒袭击目标房间（可选）">
-          <select className="select" value={rocketTarget} onChange={(e) => setRocketTarget(e.target.value)}>
-            <option value="">不使用</option>
-            {FLOORS.map((f) => (
-              <optgroup key={f.id} label={f.label}>
-                {roomsOfFloor(f.id).map((rid) => <option key={rid} value={rid}>{getRoomLabel(rid)}</option>)}
-              </optgroup>
-            ))}
-          </select>
-        </Field>
-      )}
-
-      {!isShadow && needWaterFood && (
-        <Field label={`水粮上交计划（第 ${FOOD_WATER_START_ROUND} 轮起）`}>
-          <div className="flex gap-4 text-sm">
-            <label className="flex items-center gap-1">
-              <input type="checkbox" checked={submitWater} onChange={(e) => setSubmitWater(e.target.checked)} disabled={!counts["water"]} />
-              上交水（持有 {counts["water"] ?? 0}）
-            </label>
-            <label className="flex items-center gap-1">
-              <input type="checkbox" checked={submitFood} onChange={(e) => setSubmitFood(e.target.checked)} disabled={!counts["food"]} />
-              上交粮食（持有 {counts["food"] ?? 0}）
-            </label>
-          </div>
-        </Field>
-      )}
-
-      {submitted && !isShadow && (USABLE.some((id) => counts[id]) || hasRocket || needWaterFood) && (
-        <Button variant="ghost" className="w-full" onClick={() => run((r) => reviseAction(r, me.id, { useItems: buildUseItems(), rocketTargetRoom: rocketTarget || undefined, submitWater, submitFood }))}>
-          更新本轮道具使用 / 水粮 / 火箭筒计划（抽卡后可在此声明使用，结算生效）
-        </Button>
-      )}
-
-      {!submitted ? (
-        <Button variant="primary" className="w-full" disabled={!toRoom || over || (preview ? !preview.ok : false)} onClick={doSubmit}>
-          确认移动并提交本轮行动
-        </Button>
-      ) : (
-        <div className="text-sm space-y-1">
-          <Badge tone="toxic">已提交移动（不可更改，可继续抽卡/用房间功能）</Badge>
-          <p>目标房间：{getRoomLabel(submitted.toRoom)}（{submitted.stepsUsed ?? "?"} 步）</p>
-          {submitted.path && <p className="text-slate-400">路径：{submitted.path.map(getRoomLabel).join(" → ")}</p>}
-          {submitted.usedSpecialMove && <p className="text-toxic">特殊移动：{submitted.usedSpecialMove.map((m) => SPECIAL_LABEL[m] ?? m).join("、")}</p>}
-          {submitted.gasVoteFloor ? <p>毒气投票：{submitted.gasVoteFloor}</p> : <p className="text-purple-300">未投毒气</p>}
-          {submitted.useItems && submitted.useItems.length > 0 && <p>使用道具：{submitted.useItems.map(getItemName).join("、")}</p>}
-          {submitted.rocketTargetRoom && <p>火箭筒目标：{getRoomLabel(submitted.rocketTargetRoom)}</p>}
-          {submitted.triggeredEffects?.some((t) => t.includes("激光")) && (
-            <p className="text-red-300">⚠ 本轮路径经过 102 激光室，结算阶段将 -1 生命（行动阶段不公开）。</p>
-          )}
-        </div>
-      )}
-
-      {!isShadow && submitted && <RoomInteractions room={room} me={me} run={run} />}
-      {over && <DiscardPanel me={me} run={run} />}
-
-      {submitted && (
-        <Button
-          variant="gold"
-          className="w-full"
-          disabled={over}
-          onClick={() => run((r) => endTurn(r, me.id))}
-        >
-          结束本轮行动（结束后不可更改，轮到下一顺位）
-        </Button>
-      )}
-      {over && <p className="text-[11px] text-red-300">超重时无法结束行动，请先丢弃至不超过负重。</p>}
     </div>
   );
 }
@@ -501,21 +605,30 @@ function RoomInteractions({ room, me, run }: { room: GameRoom; me: Player; run: 
   const invTotal = Object.values(roomInv).reduce((a, b) => a + b, 0);
   const [goldPick, setGoldPick] = useState("");
 
-  const canDraw = isDrawRoom(target) && target !== "B503";
-  const isTrash = target === "B503";
-  const canGold = me.inventory.includes("gold") && isDrawRoom(target) && target !== "B206" && target !== "B503";
-  const isHelipad = target === "202";
+  // §6：房间被黑客关闭时本轮不能抽卡 / 不产生收益，进入者可私密获知。
+  const closed = !isRoomFunctionAvailable(target, room);
+  const canDraw = !closed && isDrawRoom(target) && target !== "B503";
+  const isTrash = !closed && target === "B503";
+  const canGold = !closed && me.inventory.includes("gold") && isDrawRoom(target) && target !== "B206" && target !== "B503";
+  const isHelipad = !closed && target === "202";
   const availableAirdrops = room.airdrops.filter((a) => !a.claimed);
   // §3：每次行动只能常规抽卡一次；抽完即时私密展示抽到内容。
   const drawn = !!me.submittedAction?.hasDrawnFromRoom;
+  const skipped = !!me.submittedAction?.drawSkipped;
   const drawResult = me.submittedAction?.privateDrawResult ?? [];
+  // §3 强制抽卡确认：可抽卡房间且有库存时，必须抽卡或放弃，才能结束行动（关闭房间不强制）。
+  const mustHandleDraw = (canDraw || isTrash) && !drawn && !skipped && invTotal > 0;
 
   if (!fn) return null;
 
   return (
     <div className="border-t border-ink-600 pt-3 space-y-3">
       <p className="text-xs text-slate-400">目标房间功能：{fn.name} —— {fn.effect}</p>
-      <p className="text-xs text-slate-500">房间当前库存：{invTotal} 张</p>
+      {closed ? (
+        <p className="text-xs text-amber-300">该房间功能本轮被黑客关闭：无法抽卡、不触发任何房间收益（仅你可见）。</p>
+      ) : (
+        <p className="text-xs text-slate-500">房间当前库存：{invTotal} 张</p>
+      )}
 
       {(canDraw || isTrash) && drawn && (
         <div className="bg-emerald-900/20 border border-emerald-700 rounded p-2 text-sm">
@@ -526,6 +639,14 @@ function RoomInteractions({ room, me, run }: { room: GameRoom; me: Player; run: 
       )}
       {canDraw && <Button disabled={drawn} onClick={() => run((r) => drawItemsFromRoom(r, target, me.id, limit))}>抽卡（最多 {limit} 张，每次行动一次）</Button>}
       {isTrash && <Button disabled={drawn} onClick={() => run((r) => drawFromTrash(r, me.id, 5))}>垃圾场抽卡（最多 5 张，非垃圾最多保留 2 张）</Button>}
+
+      {mustHandleDraw && (
+        <div className="bg-amber-900/20 border border-amber-700 rounded p-2">
+          <p className="text-[11px] text-amber-300 mb-1">本房间可抽卡：请先抽卡，或选择放弃，否则无法结束本轮行动。</p>
+          <Button variant="ghost" className="px-2 py-1 min-h-0" onClick={() => run((r) => skipDraw(r, me.id))}>放弃抽卡</Button>
+        </div>
+      )}
+      {skipped && !drawn && <p className="text-[11px] text-slate-500">已放弃本房间抽卡。</p>}
 
       {canGold && (
         <div className="flex gap-2 items-center">
@@ -546,7 +667,7 @@ function RoomInteractions({ room, me, run }: { room: GameRoom; me: Player; run: 
             <div className="flex flex-wrap gap-2">
               {availableAirdrops.map((a) => (
                 <Button key={a.round} onClick={() => run((r) => claimAirdrop(r, me.id, a.round))}>
-                  领取第 {a.round} 轮空投（{Object.entries(a.items).map(([id, n]) => `${getItemName(id)}×${n}`).join("、")}）
+                  领取{formatRoundLabel(a.round)}空投（{Object.entries(a.items).map(([id, n]) => `${getItemName(id)}×${n}`).join("、")}）
                 </Button>
               ))}
             </div>
@@ -589,6 +710,37 @@ function DiscardPanel({ me, run }: { me: Player; run: (fn: (r: GameRoom) => Game
   );
 }
 
+/**
+ * 慈善家赠予后，被赠予玩家自行选择转出哪一项基因（v1.0.3 §1）。
+ * 只能选择当前 >0 的基因；速度不能降到 0（速度永远 ≥1）。
+ */
+function GiftGeneChoiceCard({ room, me, run }: { room: GameRoom; me: Player; run: (fn: (r: GameRoom) => GameRoom) => void }) {
+  const charity = room.players.find((p) => p.id === me.pendingGiftFrom);
+  const genes: Array<{ key: "force" | "speed" | "load"; label: string; value: number }> = [
+    { key: "force", label: "武力", value: me.force },
+    { key: "speed", label: "速度", value: me.speed },
+    { key: "load", label: "负重", value: me.load },
+  ];
+  return (
+    <Card title="慈善家赠予：请选择转移 1 点基因" className="mb-4 border-gold/50">
+      <p className="text-sm text-slate-300 mb-1">
+        你被慈善家{charity ? `（${roleWithNick(charity)}）` : ""}赠予了 1 张道具，须公开将 1 点基因永久转移给对方。
+      </p>
+      <p className="text-[11px] text-slate-500 mb-2">由你自行选择转出哪一项；不能选择数值为 0 的基因，速度不能降到 0。</p>
+      <div className="flex flex-wrap gap-2">
+        {genes.map((g) => {
+          const disabled = g.value <= 0 || (g.key === "speed" && g.value <= 1);
+          return (
+            <Button key={g.key} variant="gold" disabled={disabled} onClick={() => run((r) => chooseGiftGene(r, me.id, g.key))}>
+              转出{g.label}（当前 {g.value}）{g.key === "speed" && g.value <= 1 ? "·不可" : ""}
+            </Button>
+          );
+        })}
+      </div>
+    </Card>
+  );
+}
+
 function RoleStatusCard({ me }: { me: Player }) {
   const role = getRole(me.roleId);
   if (!role) return null;
@@ -618,7 +770,10 @@ function TradePanel({ room, me, run }: { room: GameRoom; me: Player; run: (fn: (
   const [offerOrder, setOfferOrder] = useState(false);
   const [note, setNote] = useState("");
 
-  const nameOf = (id: string) => room.players.find((p) => p.id === id)?.name ?? "玩家";
+  const nameOf = (id: string) => {
+    const p = room.players.find((x) => x.id === id);
+    return p ? roleWithNick(p) : "玩家";
+  };
 
   const doCreate = () => {
     run((r) =>
@@ -668,7 +823,7 @@ function TradePanel({ room, me, run }: { room: GameRoom; me: Player; run: (fn: (
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
         <select className="select" value={toPlayerId} onChange={(e) => setToPlayerId(e.target.value)}>
           <option value="">选择交易对象…</option>
-          {others.map((p) => <option key={p.id} value={p.id}>{p.seatIndex + 1}. {p.name}</option>)}
+          {others.map((p) => <option key={p.id} value={p.id}>{playerLabel(p)}</option>)}
         </select>
         <select className="select" value={offerItem} onChange={(e) => setOfferItem(e.target.value)}>
           <option value="">给出道具（可选）…</option>
@@ -978,7 +1133,7 @@ function TurnOrderCard({ room, myId }: { room: GameRoom; myId?: string }) {
   });
   const isAction = room.currentPhase === "ACTION";
   return (
-    <Card title={`本轮顺位（第 ${room.currentRound} 轮）`} className="mb-4">
+    <Card title={`本轮顺位（${formatRoundLabel(room.currentRound)}）`} className="mb-4">
       <div className="space-y-1 text-sm">
         {ordered.map((p) => {
           const isCurrent = isAction && p.id === turnId;

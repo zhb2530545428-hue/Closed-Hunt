@@ -16,6 +16,8 @@ import {
   isGeneValid,
   canStartGame,
   startGame,
+  fillTestPlayers,
+  addRandomTestPlayer,
 } from "@/game/engine";
 import { ROLES, getRole } from "@/game/config/roles";
 import { SPAWN_ROOMS } from "@/game/config/spawnRooms";
@@ -158,6 +160,22 @@ export default function LobbyPage() {
             你不是房主。仅房主（{room.players.find((p) => p.id === room.hostPlayerId)?.name}）可开始游戏。
           </p>
         )}
+        {/* §8：本地热座 / 房主调试专用——随机生成测试玩家，不对正式线上普通玩家开放。 */}
+        {!remote && isHost && (
+          <div className="mb-3">
+            <div className="flex flex-wrap gap-2">
+              <Button variant="ghost" onClick={() => run((r) => addRandomTestPlayer(r))} disabled={room.players.every((p) => !!p.name)}>
+                随机生成 1 名玩家（本地测试）
+              </Button>
+              <Button variant="ghost" onClick={() => run((r) => fillTestPlayers(r))}>
+                一键生成 9 名玩家（本地测试）
+              </Button>
+            </div>
+            <p className="text-[11px] text-slate-500 mt-1">
+              自动填充唯一昵称 / 唯一角色 / 合法基因点（速度≥1）/ 出生房间并准备。座位满则「随机生成 1 名」禁用。
+            </p>
+          </div>
+        )}
         <div className="flex items-center gap-3 flex-wrap">
           <Button variant="primary" disabled={!isHost || !startCheck.ok} onClick={handleStart}>
             开始游戏
@@ -229,8 +247,13 @@ function SeatCard({
           maxLength={12}
           onChange={(e) => setJoinName(e.target.value)}
         />
-        <Button variant="gold" className="w-full" onClick={() => joinName.trim() && onJoin(joinName.trim())}>
-          加入此座位
+        <Button
+          variant="gold"
+          className="w-full"
+          disabled={!joinName.trim()}
+          onClick={() => joinName.trim() && onJoin(joinName.trim())}
+        >
+          {joinName.trim() ? "加入此座位" : "先输入昵称"}
         </Button>
       </Card>
     );
@@ -238,7 +261,9 @@ function SeatCard({
 
   const setGene = (key: "force" | "speed" | "load", value: number) => {
     const genes = { force: player.force, speed: player.speed, load: player.load };
-    genes[key] = Math.max(0, Math.min(10, value || 0));
+    // v1.0.3 §5.1：速度下限为 1（永不为 0）。
+    const min = key === "speed" ? 1 : 0;
+    genes[key] = Math.max(min, Math.min(10, value || 0));
     onUpdate({ genes });
   };
 
@@ -289,7 +314,7 @@ function SeatCard({
             </span>
             <input
               type="number"
-              min={0}
+              min={k === "speed" ? 1 : 0}
               max={10}
               className="w-full bg-ink-700 border border-ink-600 rounded px-2 py-1 text-sm"
               value={player[k]}

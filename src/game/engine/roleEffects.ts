@@ -4,11 +4,13 @@
 // 的对应步骤中调用本文件导出的辅助函数，保证规则不散落在 UI。
 
 import type { GameRoom, Inventory, Player } from "../types";
-import { invRemove, invToList, isOverweight } from "../inventory";
+import { invRemove, invToList, isOverweight, canGainItem } from "../inventory";
 import { roleMaxUses } from "../config/roles";
 import { isGunItem, getItemName } from "../config/items";
 import { getRoomLabel, ROOM_IDS } from "../config/rooms";
 import { normalStepDistance } from "../utils/movement";
+import { appendLog, nowISO } from "./helpers";
+import { roleName } from "../utils/names";
 
 const HOUND_MAX_STEPS = 5;
 const HELIPAD = "202";
@@ -187,6 +189,7 @@ export function applyDeclaredSkill(room: GameRoom, actorId: string): { room: Gam
       const sum = g.force + g.speed + g.load;
       if (sum !== me.force + me.speed + me.load) throw new Error("重新分配的基因总和必须与当前一致。");
       if (g.force < 0 || g.speed < 0 || g.load < 0) throw new Error("基因不能为负。");
+      if (g.speed < 1) throw new Error("速度不能为 0（最低 1）。"); // v1.0.3 §5.1
       me.force = g.force; me.speed = g.speed; me.load = g.load;
       logs.push(`黑客 ${me.name} 远程执行操作室：重新分配基因为 武力${g.force}/速度${g.speed}/负重${g.load}。`);
     } else {
@@ -207,6 +210,9 @@ export function applyDeclaredSkill(room: GameRoom, actorId: string): { room: Gam
     const result = houndPick(targetRoom, roomInventories, airdrops);
     if (!result) {
       logs.push(`驯兽师 ${me.name} 派遣猎犬前往 ${getRoomLabel(targetRoom)}，但无库存可抽，无功而返。`);
+    } else if (!canGainItem(me, result.itemId).ok) {
+      // v1.0.3 §5.3：负重 0 无次元口袋时不能获得次元口袋，猎犬无功而返。
+      logs.push(`驯兽师 ${me.name} 的猎犬在 ${getRoomLabel(targetRoom)} 抽到${getItemName(result.itemId)}，但负重为 0 无法获得，无功而返。`);
     } else {
       const tmp: Player = { ...me, inventory: [...me.inventory, result.itemId] };
       if (isOverweight(tmp)) {
@@ -252,4 +258,38 @@ function houndPick(
   const itemId = pool[Math.floor(Math.random() * pool.length)];
   const { inv } = invRemove(roomInventories[targetRoom] ?? {}, itemId, 1);
   return { itemId, roomInventories: { ...roomInventories, [targetRoom]: inv }, airdrops };
+}
+
+/**
+ * 被赠予玩家自行选择转出 1 点基因给慈善家（v1.0.3 §1）。
+ * - 仅当该玩家存在待处理的慈善家赠予（pendingGiftFrom）时可用；
+ * - 只能选择当前数值 > 0 的基因；速度不能因此降到 0（速度永远 ≥1，§5.1）；
+ * - 选定基因 -1，对应慈善家该基因 +1，并写入「公开转移」日志（脱敏：仅角色名，无位置）。
+ */
+export function chooseGiftGene(
+  room: GameRoom,
+  playerId: string,
+  gene: "force" | "speed" | "load"
+): GameRoom {
+  const target = room.players.find((p) => p.id === playerId);
+  if (!target) throw new Error("玩家不存在。");
+  const charityId = target.pendingGiftFrom;
+  if (!charityId) throw new Error("你当前没有待处理的基因转移。");
+  if (target[gene] <= 0) throw new Error("不能转移数值为 0 的基因。");
+  if (gene === "speed" && target[gene] <= 1) throw new Error("速度不能降到 0，请改选其他基因转移。");
+
+  const players: Player[] = room.players.map((p) => ({ ...p }));
+  const me = players.find((p) => p.id === playerId)!;
+  const charity = players.find((p) => p.id === charityId);
+  me[gene] -= 1;
+  me.pendingGiftFrom = null;
+  if (charity) charity[gene] += 1;
+
+  let next: GameRoom = { ...room, players, updatedAt: nowISO() };
+  const gname = gene === "force" ? "武力" : gene === "speed" ? "速度" : "负重";
+  next = appendLog(
+    next,
+    `${roleName(me)} 公开转移 1 点${gname}给 ${charity ? roleName(charity) : "慈善家"}（慈善家赠予）。`
+  );
+  return next;
 }

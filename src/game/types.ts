@@ -37,6 +37,8 @@ export interface PlayerRoundAction {
   drawnRoomId?: string;
   /** 本次抽到的道具 id（私密，仅本人可见；不写入公共日志） */
   privateDrawResult?: string[];
+  /** 本轮已主动放弃在目标可抽卡房间抽卡（与 hasDrawnFromRoom 一起用于强制抽卡确认，v1.0.2 §3） */
+  drawSkipped?: boolean;
   /** 本轮声明使用的道具 id（药片/酒/肾上腺素等），结算时处理 */
   useItems?: string[];
   /** 本轮声明的职业主动技能（移动阶段，v1.0） */
@@ -115,6 +117,12 @@ export interface Player {
   /** 上一轮结束时生命值（全员暗影排名用，规则 17.4） */
   lastRoundHp?: number;
 
+  // —— 水粮预交（v1.0.3 §7.1：本轮行动末尾预交「下一轮」水粮，下一轮结算时按此处理） ——
+  /** 上一轮预交并将于本轮结算上交的水（由上一轮行动 submitWater 结转而来） */
+  waterPledged?: boolean;
+  /** 上一轮预交并将于本轮结算上交的粮食 */
+  foodPledged?: boolean;
+
   // —— 职业运行时（v1.0，规则 3.2） ——
   /** 整局技能已使用次数（限次职业用） */
   roleUses?: number;
@@ -128,6 +136,11 @@ export interface Player {
   giftedDone?: boolean;
   /** 本轮被催眠强制前往的房间 */
   forcedRoom?: string | null;
+  /**
+   * 待处理的慈善家基因转移（v1.0.3 §1）：被赠予玩家须自行选择转出 1 点基因给该慈善家。
+   * 结算阶段赠予成立时设置；玩家在面板选择基因（武力/速度/负重，须 >0）后清空。
+   */
+  pendingGiftFrom?: string | null;
   /** 结算阶段待恢复生命（催眠师/预言家技能产生） */
   roleHealPending?: number;
   /** 待公开分配的自由基因点（预言家技能产生） */
@@ -147,7 +160,13 @@ export interface GameLog {
   id: string;
   round: number;
   phase: GamePhase;
-  visibility: "public" | "private";
+  /**
+   * 日志可见性（v1.0.2 §4 三层结算视图）：
+   * - public：所有人可见（公开战况看板）；
+   * - private：仅 playerId 本人可见（私密面板）；
+   * - host：仅房主裁判视图可见（完整明细，如毒气票数）。
+   */
+  visibility: "public" | "private" | "host";
   playerId?: string;
   message: string;
   createdAt: string;
@@ -168,7 +187,12 @@ export interface ResolutionStep {
   /** 步骤 key，对应固定结算顺序 */
   type: string;
   title: string;
+  /** 公开日志：结算后所有玩家可见（仅规则允许公开的信息）。 */
   logs: string[];
+  /** 房主裁判专属明细（如毒气票数），仅房主可见（v1.0.2 §4 C / §5）。 */
+  hostLogs?: string[];
+  /** 玩家私密结算信息：仅对应 playerId 本人可见（如黑客锁房间提示，v1.0.2 §4 B）。 */
+  privateLogs?: Array<{ playerId: string; text: string }>;
   effects: ResolutionEffect[];
 }
 

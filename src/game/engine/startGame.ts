@@ -103,6 +103,6 @@ export function startGame(room: GameRoom): GameRoom {
     .map((p) => `${p.name}=${getRole(p.roleId)?.name ?? "?"}`)
     .join("，");
   next = appendLog(next, `角色分配完成：${roster}。`);
-  next = appendLog(next, "游戏开始。第 1 轮自由阶段开始。");
+  next = appendLog(next, "游戏开始。首轮自由阶段开始。");
   return next;
 }

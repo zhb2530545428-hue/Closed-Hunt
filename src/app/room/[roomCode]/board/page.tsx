@@ -36,6 +36,8 @@ import { FLOORS, getFloorLabel } from "@/game/config/floors";
 import { getItemName, ITEMS } from "@/game/config/items";
 import { getRoomLabel, ROOMS } from "@/game/config/rooms";
 import { PHASE_INFO } from "@/game/config/phases";
+import { TOTAL_ROUNDS, formatRoundLabel } from "@/game/config/rounds";
+import { formatPlayerName, roleWithNick } from "@/game/utils/names";
 
 export default function BoardPage() {
   const params = useParams<{ roomCode: string }>();
@@ -79,7 +81,7 @@ export default function BoardPage() {
 
       <Card className="mb-4">
         <div className="flex flex-wrap items-center gap-3">
-          <Badge tone="gold">第 {room.currentRound} 轮</Badge>
+          <Badge tone="gold">{formatRoundLabel(room.currentRound)}</Badge>
           <Badge tone="toxic">{phase?.label}</Badge>
           {room.currentPhase === "ACTION" && (
             <span className="text-sm text-slate-400">提交进度：{seated.filter((p) => p.submittedAction).length} / {seated.length}</span>
@@ -95,7 +97,7 @@ export default function BoardPage() {
         <div className="flex flex-wrap gap-2">
           {seated.map((p) => (
             <Button key={p.id} variant={p.id === myId ? "gold" : "ghost"} onClick={() => setIdentity(code, p.id)}>
-              {p.seatIndex + 1}. {p.name}{p.id === room.hostPlayerId ? "（房主）" : ""}
+              {roleWithNick(p)}{p.id === room.hostPlayerId ? "（房主）" : ""}
             </Button>
           ))}
         </div>
@@ -112,7 +114,8 @@ export default function BoardPage() {
 
       {room.currentPhase === "GAME_OVER" && <RankingPanel room={room} />}
 
-      {room.resolutionPreview && <PreviewPanel room={room} />}
+      {/* §4：结算预览即「房主裁判视图」，仅房主可见；确认后才按可见性分发为公开/私密/裁判日志。 */}
+      {room.resolutionPreview && isHost && <PreviewPanel room={room} />}
 
       {isHost ? (
         <HostConsole room={room} seated={seated} run={run} code={code} />
@@ -146,8 +149,8 @@ function PlayersBoard({ room, seated, isHost }: { room: GameRoom; seated: Player
                   <span className="text-slate-400 text-xs w-10">
                     {p.status === "shadow" ? "暗影" : p.orderCard != null ? `顺位${p.orderCard}` : `#${p.seatIndex + 1}`}
                   </span>
-                  <span className="font-medium">P{p.seatIndex + 1} {p.name}</span>
-                  <span className="text-slate-400 text-xs">｜{getRole(p.roleId)?.name ?? "—"}</span>
+                  <span className="font-medium">{getRole(p.roleId)?.name ?? "未定角色"}</span>
+                  <span className="text-slate-400 text-xs">（{p.name}）</span>
                   {p.id === room.hostPlayerId && <span className="text-gold text-xs">房主</span>}
                   {p.status === "shadow" ? <Badge tone="shadow">暗影</Badge> : <Badge tone="toxic">存活</Badge>}
                   {p.reviveProtectedRound === room.currentRound && <Badge tone="gold">复活保护</Badge>}
@@ -184,7 +187,7 @@ function LogPanel({ room }: { room: GameRoom }) {
         {logs.length === 0 && <p className="text-slate-500">暂无日志。</p>}
         {logs.map((l) => (
           <div key={l.id} className="text-slate-300">
-            <span className="text-slate-500 text-xs mr-2">[R{l.round}·{PHASE_INFO[l.phase]?.label ?? l.phase}]</span>
+            <span className="text-slate-500 text-xs mr-2">[{formatRoundLabel(l.round)}·{PHASE_INFO[l.phase]?.label ?? l.phase}]</span>
             {l.message}
           </div>
         ))}
@@ -195,10 +198,15 @@ function LogPanel({ room }: { room: GameRoom }) {
 
 function PreviewPanel({ room }: { room: GameRoom }) {
   const preview = room.resolutionPreview!;
-  const nameOf = (id?: string) => room.players.find((p) => p.id === id)?.name ?? id ?? "";
+  const nameOf = (id?: string) => {
+    const p = room.players.find((x) => x.id === id);
+    return p ? formatPlayerName(p, "host") : id ?? "";
+  };
   return (
-    <Card title={`结算预览（第 ${preview.round} 轮）`} className="mt-4 border-gold/40">
-      <p className="text-xs text-slate-400 mb-3">以下为系统按固定顺序计算的结果，房主核对后点击「确认应用结算」。</p>
+    <Card title={`结算预览 · 房主裁判视图（${formatRoundLabel(preview.round)}）`} className="mt-4 border-gold/40">
+      <p className="text-xs text-slate-400 mb-3">
+        以下为完整裁判视图（含票数明细与玩家私密信息），仅房主可见。核对后点击「确认应用结算」，确认后按公开 / 私密 / 裁判分层落地。
+      </p>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
         {preview.steps.map((s: ResolutionStep) => (
           <div key={s.type} className="bg-ink-700 border border-ink-600 rounded p-3">
@@ -206,6 +214,16 @@ function PreviewPanel({ room }: { room: GameRoom }) {
             <div className="text-xs text-slate-300 space-y-0.5">
               {s.logs.map((m, i) => (<div key={i}>{m}</div>))}
             </div>
+            {(s.hostLogs ?? []).length > 0 && (
+              <div className="text-[11px] text-amber-300 space-y-0.5 mt-1">
+                {s.hostLogs!.map((m, i) => (<div key={i}>🔒 {m}</div>))}
+              </div>
+            )}
+            {(s.privateLogs ?? []).length > 0 && (
+              <div className="text-[11px] text-purple-300 space-y-0.5 mt-1">
+                {s.privateLogs!.map((pl, i) => (<div key={i}>👤 {nameOf(pl.playerId)}：{pl.text}</div>))}
+              </div>
+            )}
             {s.effects.some((e) => e.hpChange) && (
               <div className="mt-2 text-[11px] text-slate-400">
                 {s.effects.filter((e) => e.hpChange).map((e, i) => (
@@ -239,7 +257,7 @@ function HostConsole({ room, seated, run, code }: { room: GameRoom; seated: Play
         <Button onClick={() => run((r) => goToPhase(r, "RESOLUTION"))} disabled={isOver}>进入结算阶段</Button>
         <Button variant="gold" disabled={!isResolution} onClick={() => run((r) => generateResolutionPreview(r))}>生成结算预览</Button>
         <Button variant="primary" disabled={!isResolution || !room.resolutionPreview} onClick={() => run((r) => confirmResolution(r))}>
-          确认应用结算 → {room.currentRound >= 6 ? "最终结算" : "下一轮"}
+          确认应用结算 → {room.currentRound >= TOTAL_ROUNDS ? "最终结算" : "下一轮"}
         </Button>
         <Button variant="danger" disabled={isOver} onClick={() => run((r) => endGame(r))}>结束游戏</Button>
       </div>
@@ -262,7 +280,7 @@ function HostConsole({ room, seated, run, code }: { room: GameRoom; seated: Play
           <div className="font-semibold text-slate-300 mb-1">火箭筒目标</div>
           {rocketTargets.length === 0 ? <div className="text-slate-500">无</div> :
             rocketTargets.map((p) => (
-              <div key={p.id}>{p.name} → {getRoomLabel(p.submittedAction!.rocketTargetRoom!)}</div>
+              <div key={p.id}>{roleWithNick(p)} → {getRoomLabel(p.submittedAction!.rocketTargetRoom!)}</div>
             ))}
         </div>
       </div>
@@ -291,6 +309,7 @@ function HostConsole({ room, seated, run, code }: { room: GameRoom; seated: Play
         <Button variant="primary" onClick={() => { if (!logText.trim()) return; run((r) => addPublicLog(r, logText)); setLogText(""); }}>添加</Button>
       </div>
 
+      <JudgeLogPanel room={room} />
       <TradesAdminPanel room={room} run={run} />
       <AdvancedCorrectionPanel room={room} seated={seated} run={run} />
       <SnapshotPanel code={code} />
@@ -299,10 +318,43 @@ function HostConsole({ room, seated, run, code }: { room: GameRoom; seated: Play
   );
 }
 
+/** 房主裁判日志（§4 C）：仅房主可见的完整明细——毒气票数、各玩家私密结算信息。 */
+function JudgeLogPanel({ room }: { room: GameRoom }) {
+  const logs = room.publicLogs.filter((l) => l.visibility === "host" || l.visibility === "private").reverse();
+  const nameOf = (id?: string) => {
+    const p = room.players.find((x) => x.id === id);
+    return p ? formatPlayerName(p, "host") : id ?? "";
+  };
+  return (
+    <details className="mb-3 bg-ink-700 rounded">
+      <summary className="cursor-pointer px-3 py-2 text-sm font-semibold text-slate-300">
+        房主裁判日志 · 含票数 / 玩家私密（{logs.length}）
+      </summary>
+      <div className="px-3 pb-3 space-y-1 max-h-72 overflow-y-auto">
+        {logs.length === 0 && <p className="text-xs text-slate-500">暂无裁判明细。</p>}
+        {logs.map((l) => (
+          <div key={l.id} className="text-xs">
+            <span className="text-slate-500 mr-1">[{formatRoundLabel(l.round)}]</span>
+            {l.visibility === "host" ? (
+              <span className="text-amber-300">🔒</span>
+            ) : (
+              <span className="text-purple-300">👤{l.playerId ? ` ${nameOf(l.playerId)}` : ""}</span>
+            )}
+            <span className="ml-1 text-slate-300">{l.message}</span>
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
 /** 房主：待处理交易管理（取消异常交易）。 */
 function TradesAdminPanel({ room, run }: { room: GameRoom; run: (fn: (r: GameRoom) => GameRoom) => void }) {
   const pending = room.trades.filter((t) => t.status === "pending");
-  const nameOf = (id: string) => room.players.find((p) => p.id === id)?.name ?? id;
+  const nameOf = (id: string) => {
+    const p = room.players.find((x) => x.id === id);
+    return p ? roleWithNick(p) : id;
+  };
   if (pending.length === 0) return null;
   return (
     <details className="mb-3 bg-ink-700 rounded">

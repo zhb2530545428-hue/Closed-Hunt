@@ -11,13 +11,18 @@ import { isRoomGassed } from "../src/game/gas";
 import { getInventoryWeight, getCarryLimit, isOverweight } from "../src/game/inventory";
 import { validateMapGraph } from "../src/game/config/mapGraph";
 import { getReachableRooms, validateMove, type MoveContext } from "../src/game/utils/movement";
-import { applyRoleSetup, roleHasGun, applyDeclaredSkill } from "../src/game/engine/roleEffects";
-import { createTrade, respondTrade } from "../src/game/engine/trade";
+import { applyRoleSetup, roleHasGun, applyDeclaredSkill, chooseGiftGene } from "../src/game/engine/roleEffects";
+import { createTrade, respondTrade, validateTurnOrderCards } from "../src/game/engine/trade";
 import { computeRanking, applyFinalGoldConversion } from "../src/game/resolution/ranking";
-import { resolveRoleAssignments } from "../src/game/engine/lobby";
-import { currentTurnPlayerId, endTurn } from "../src/game/engine/advancePhase";
-import { submitAction } from "../src/game/engine/submitAction";
-import { drawItemsFromRoom } from "../src/game/engine/draw";
+import { resolveRoleAssignments, fillTestPlayers, addRandomTestPlayer, isGeneValid, validateInitialGenes } from "../src/game/engine/lobby";
+import { canStartGame } from "../src/game/engine/startGame";
+import { currentTurnPlayerId, endTurn, confirmResolution, generateResolutionPreview, goToPhase } from "../src/game/engine/advancePhase";
+import { submitAction, reviseAction } from "../src/game/engine/submitAction";
+import { drawItemsFromRoom, skipDraw } from "../src/game/engine/draw";
+import { canGainItem } from "../src/game/inventory";
+import { isRoomFunctionAvailable } from "../src/game/config/roomFunctions";
+import { formatRoundLabel } from "../src/game/config/rounds";
+import { createGame } from "../src/game/engine/createGame";
 import { DEFAULT_MAP_CONNECTIONS, makeConnectionId } from "../src/game/config/mapConnections";
 import { DEFAULT_MAP_LAYOUT } from "../src/game/config/mapLayout";
 import { shortestPath, validateMapData } from "../src/game/utils/mapEditor";
@@ -55,6 +60,9 @@ function makePlayer(p: Partial<Player> & { id: string }): Player {
     shadowDrainCount: p.shadowDrainCount ?? 0,
     lastRoundHp: p.lastRoundHp,
     endedAction: p.endedAction,
+    waterPledged: p.waterPledged,
+    foodPledged: p.foodPledged,
+    pendingGiftFrom: p.pendingGiftFrom,
     isReady: true,
     submittedAction: p.submittedAction ?? null,
   };
@@ -326,8 +334,9 @@ test("病毒携带者：第 1 轮仅标记，第 2 轮扣 N", () => {
 });
 
 test("化学家 chemist_plus 使毒气伤害 +2", () => {
-  const chem = makePlayer({ id: "c", roleId: "chemist", submittedAction: { round: 1, fromRoom: null, toRoom: "B302", gasVoteFloor: "B3", roleSkill: { type: "chemist_plus" }, submittedAt: "" } });
-  const room = makeRoom([chem], 1, ["B3"]);
+  // 内部轮号 2 = 第 1 轮（毒气基础 -1）；+2 → -3。预交水粮（waterPledged/foodPledged）避免额外扣血。
+  const chem = makePlayer({ id: "c", roleId: "chemist", inventory: ["water", "food"], waterPledged: true, foodPledged: true, submittedAction: { round: 2, fromRoom: null, toRoom: "B302", gasVoteFloor: "B3", roleSkill: { type: "chemist_plus" }, submittedAt: "" } });
+  const room = makeRoom([chem], 2, ["B3"]);
   const r = buildResolutionPreview(room);
   assert.equal(r.nextRoom.players[0].hp, 7); // 第 1 轮基础 1 + 2 = 3
 });
@@ -355,16 +364,29 @@ test("催眠师 applyDeclaredSkill 设置强制房间并消耗次数", () => {
   assert.equal(me.roleHealPending, 1);
 });
 
-test("慈善家赠予并夺取目标 1 点最高基因", () => {
+test("慈善家赠予：成立后挂起待处理基因选择，由被赠予者自选（不自动转最高）", () => {
   const phil = makePlayer({ id: "p", roleId: "philanthropist", force: 1, inventory: ["pill"], submittedAction: { round: 1, fromRoom: null, toRoom: "103", gasVoteFloor: "B1", roleSkill: { type: "gift", giveItemId: "pill", targetPlayerIds: ["t"] }, submittedAt: "" } });
   const target = makePlayer({ id: "t", force: 6, speed: 2, load: 2, submittedAction: { round: 1, fromRoom: null, toRoom: "B302", gasVoteFloor: "B1", submittedAt: "" } });
   const r = buildResolutionPreview(makeRoom([phil, target], 1));
   const pt = r.nextRoom.players.find((p) => p.id === "t")!;
   const pp = r.nextRoom.players.find((p) => p.id === "p")!;
-  assert.equal(pt.force, 5);          // 最高基因武力 -1
-  assert.equal(pp.force, 2);          // 慈善家武力 +1
+  assert.equal(pt.force, 6);                 // 基因尚未转移（等待对方选择）
+  assert.equal(pp.force, 1);
   assert.equal(pt.giftedDone, true);
-  assert.ok(pt.inventory.includes("pill")); // 收到赠予道具
+  assert.equal(pt.pendingGiftFrom, "p");     // 挂起待选
+  assert.ok(pt.inventory.includes("pill"));  // 收到赠予道具
+});
+
+test("被赠予者选择转出基因：所选 -1，慈善家 +1；不能选 0 基因；速度不能降到 0", () => {
+  const phil = makePlayer({ id: "p", roleId: "philanthropist", force: 2, speed: 3, load: 0 });
+  const target = makePlayer({ id: "t", force: 0, speed: 1, load: 5, pendingGiftFrom: "p" });
+  const room = makeRoom([phil, target], 1);
+  assert.throws(() => chooseGiftGene(room, "t", "force"), /数值为 0/); // force=0 不可选
+  assert.throws(() => chooseGiftGene(room, "t", "speed"), /速度/);     // speed=1 转出会归 0
+  const after = chooseGiftGene(room, "t", "load");
+  assert.equal(after.players.find((p) => p.id === "t")!.load, 4); // 被赠予者 load -1
+  assert.equal(after.players.find((p) => p.id === "p")!.load, 1); // 慈善家 load +1
+  assert.equal(after.players.find((p) => p.id === "t")!.pendingGiftFrom, null);
 });
 
 test("饮品师：果汁不占负重，开局得 B601 两张果汁", () => {
@@ -638,7 +660,9 @@ test("激光伤害延迟到结算：提交时不扣血，结算房间效果才 -
   const prev = buildResolutionPreview(room);
   assert.equal(prev.nextRoom.players[0].hp, 9, "结算后 -1");
   const roomStep = prev.steps.find((s) => s.type === "roomEffects")!;
-  assert.ok(roomStep.logs.some((m) => /激光/.test(m)));
+  // v1.0.3 §4.3：激光属位置敏感信息——只在裁判/私密日志，不进公开日志。
+  assert.ok(!roomStep.logs.some((m) => /激光/.test(m)), "公开日志不含激光位置");
+  assert.ok((roomStep.hostLogs ?? []).some((m) => /激光/.test(m)), "裁判日志含激光");
 });
 
 test("暗影经过激光室不受伤害", () => {
@@ -701,6 +725,270 @@ test("校验能检测重复连接", () => {
 test("makeConnectionId 双向与端点顺序无关、单向保留方向", () => {
   assert.equal(makeConnectionId("B105", "B103", "adjacent", true), makeConnectionId("B103", "B105", "adjacent", true));
   assert.notEqual(makeConnectionId("B105", "B503", "pipe", false), makeConnectionId("B503", "B105", "pipe", false));
+});
+
+// ---------- v1.0.2 修复 ----------
+console.log("v1.0.2 顺位卡交易唯一性：");
+
+test("顺位卡交易统一为交换：A↔B、B↔C 后三人仍各 1 张且唯一", () => {
+  const a = makePlayer({ id: "a", name: "A", orderCard: 1 });
+  const b = makePlayer({ id: "b", name: "B", orderCard: 2 });
+  const c = makePlayer({ id: "c", name: "C", orderCard: 3 });
+  let room = freeRoom([a, b, c]);
+  // 只勾「给出顺位卡」，引擎应自动视为双方交换
+  room = createTrade(room, "a", { toPlayerId: "b", offerOrderCard: true });
+  room = respondTrade(room, room.trades[room.trades.length - 1].id, true);
+  room = createTrade(room, "b", { toPlayerId: "c", offerOrderCard: true });
+  room = respondTrade(room, room.trades[room.trades.length - 1].id, true);
+  const cards = room.players.map((p) => p.orderCard).sort();
+  assert.deepEqual(cards, [1, 2, 3]); // 集合不变：无重复、无丢失
+  assert.equal(validateTurnOrderCards(room).ok, true);
+});
+
+test("validateTurnOrderCards 检出重复 / 缺失", () => {
+  const dup = makeRoom([makePlayer({ id: "a", name: "A", orderCard: 1 }), makePlayer({ id: "b", name: "B", orderCard: 1 })], 1);
+  assert.equal(validateTurnOrderCards(dup).ok, false);
+  const missing = makeRoom([makePlayer({ id: "a", name: "A", orderCard: null })], 1);
+  assert.equal(validateTurnOrderCards(missing).ok, false);
+});
+
+test("行动阶段不能再处理交易（顺位卡冻结）", () => {
+  const a = makePlayer({ id: "a", name: "A", orderCard: 1 });
+  const b = makePlayer({ id: "b", name: "B", orderCard: 2 });
+  let room = createTrade(freeRoom([a, b]), "a", { toPlayerId: "b", offerOrderCard: true });
+  const tid = room.trades[0].id;
+  room = { ...room, currentPhase: "ACTION", status: "ACTION" };
+  assert.throws(() => respondTrade(room, tid, true), /自由阶段/);
+});
+
+console.log("v1.0.2 轮次表达：");
+
+test("formatRoundLabel：1→首轮，2→第1轮，7→第6轮", () => {
+  assert.equal(formatRoundLabel(1), "首轮");
+  assert.equal(formatRoundLabel(2), "第 1 轮");
+  assert.equal(formatRoundLabel(7), "第 6 轮");
+});
+
+test("首轮（内部1）无毒气伤害；第1轮（内部2）毒气 -1", () => {
+  const mk = (round: number) => {
+    const p = makePlayer({ id: "p", inventory: ["water", "food"], waterPledged: true, foodPledged: true, submittedAction: { round, fromRoom: null, toRoom: "B302", gasVoteFloor: "B3", submittedAt: "" } });
+    return buildResolutionPreview(makeRoom([p], round, ["B3"]));
+  };
+  assert.equal(mk(1).nextRoom.players[0].hp, 10); // 首轮无毒气伤害
+  assert.equal(mk(2).nextRoom.players[0].hp, 9);  // 第 1 轮 -1
+});
+
+console.log("v1.0.2 毒气公开不显示票数：");
+
+test("毒气公开日志只显示楼层，票数仅房主裁判可见", () => {
+  const ps = [
+    at("a", "103", { gasVoteFloor: "B3" }), at("b", "103", { gasVoteFloor: "B3" }),
+    at("c", "103", { gasVoteFloor: "B5" }),
+  ];
+  const prev = buildResolutionPreview(makeRoom(ps, 2));
+  const gas = prev.steps.find((s) => s.type === "gas")!;
+  assert.ok(gas.logs.some((m) => /毒气楼层/.test(m)), "公开应含毒气楼层");
+  assert.ok(!gas.logs.some((m) => /计票|票/.test(m)), "公开不应含票数");
+  assert.ok((gas.hostLogs ?? []).some((m) => /计票/.test(m)), "票数应在房主裁判日志");
+});
+
+console.log("v1.0.2 强制抽卡确认：");
+
+test("可抽卡房间未抽未放弃不能结束行动；放弃后可结束", () => {
+  const a = makePlayer({ id: "a", name: "A", orderCard: 1, location: "B106", load: 9 });
+  let room = actionRoom([a]);
+  room.roomInventories = { B107: { knife: 5 } };
+  room = submitAction(room, "a", { toRoom: "B107", gasVoteFloor: "B1" });
+  assert.throws(() => endTurn(room, "a"), /抽卡/);
+  room = skipDraw(room, "a");
+  room = endTurn(room, "a");
+  assert.equal(room.players.find((p) => p.id === "a")!.endedAction, true);
+});
+
+test("抽卡后可直接结束行动", () => {
+  const a = makePlayer({ id: "a", name: "A", orderCard: 1, location: "B106", load: 9 });
+  let room = actionRoom([a]);
+  room.roomInventories = { B107: { knife: 5 } };
+  room = submitAction(room, "a", { toRoom: "B107", gasVoteFloor: "B1" });
+  room = drawItemsFromRoom(room, "B107", "a", 2);
+  room = endTurn(room, "a");
+  assert.equal(room.players.find((p) => p.id === "a")!.endedAction, true);
+});
+
+console.log("v1.0.2 本地热座随机生成：");
+
+test("fillTestPlayers 生成 9 名玩家、角色唯一、可开始", () => {
+  const room = createGame({ hostName: "房主", devMode: false });
+  const filled = fillTestPlayers(room);
+  const seated = filled.players.filter((p) => p.name);
+  assert.equal(seated.length, 9);
+  assert.equal(new Set(seated.map((p) => p.preferredRoleId)).size, 9); // 角色唯一
+  assert.ok(seated.every((p) => !!p.location && isGeneValid({ force: p.force, speed: p.speed, load: p.load })));
+  assert.equal(canStartGame(filled).ok, true);
+});
+
+console.log("v1.0.2 果汁目标 / 三层日志：");
+
+test("普通玩家果汁对自己使用并消耗（目标=自己，掷面6 +2）", () => {
+  // 普通玩家也可逐瓶指定目标/骰面（UI 默认对自己）；此处指定骰面 6 保证确定性。
+  const p = makePlayer({ id: "p", hp: 5, inventory: ["juice"], submittedAction: { round: 1, fromRoom: null, toRoom: "103", gasVoteFloor: "B1", useItems: ["juice"], roleSkill: { type: "juice", juiceAssignments: [{ targetPlayerId: "p", diceFaces: [6] }] }, submittedAt: "" } });
+  const r = buildResolutionPreview(makeRoom([p], 1));
+  assert.equal(r.nextRoom.consumedPile.juice, 1); // 果汁被消耗
+  assert.equal(r.nextRoom.players[0].hp, 7); // 对自己掷出 6 → 生命 +2
+});
+
+test("黑客锁房间：进入者私密提示，公开日志不暴露被锁房间", () => {
+  const hacker = makePlayer({ id: "h", name: "H", roleId: "hacker", submittedAction: { round: 1, fromRoom: null, toRoom: "103", gasVoteFloor: "B1", roleSkill: { type: "hacker_close", targetRoom: "201" }, submittedAt: "" } });
+  const g = makePlayer({ id: "g", name: "G", force: 1, speed: 1, load: 1, submittedAction: { round: 1, fromRoom: null, toRoom: "201", gasVoteFloor: "B1", roomAction: "gene", submittedAt: "" } });
+  const after = applyDeclaredSkill(makeRoom([hacker, g], 1), "h").room;
+  const prev = buildResolutionPreview(after);
+  const rs = prev.steps.find((s) => s.type === "roomEffects")!;
+  assert.ok((rs.privateLogs ?? []).some((pl) => pl.playerId === "g" && /功能被关闭/.test(pl.text)), "进入者应收到私密提示");
+  assert.ok(!rs.logs.some((m) => /201|关闭/.test(m)), "公开日志不应暴露被锁房间");
+});
+
+// ---------- v1.0.3 修复 ----------
+console.log("v1.0.3 属性校验：");
+
+test("初始属性：速度不能为 0；和不能超过 10；和需恰为 10", () => {
+  assert.equal(validateInitialGenes({ force: 5, speed: 0, load: 5 }).ok, false); // 速度 0
+  assert.equal(validateInitialGenes({ force: 5, speed: 4, load: 5 }).ok, false); // 和 14 >10
+  assert.equal(validateInitialGenes({ force: 4, speed: 3, load: 2 }).ok, false); // 和 9 ≠10
+  assert.equal(validateInitialGenes({ force: 4, speed: 4, load: 2 }).ok, true);
+  assert.equal(isGeneValid({ force: 5, speed: 0, load: 5 }), false); // isGeneValid 也要求速度≥1
+});
+
+test("操作室重分配基因：速度不能为 0", () => {
+  const h = makePlayer({ id: "h", roleId: "hacker", force: 5, speed: 1, load: 4, submittedAction: { round: 1, fromRoom: null, toRoom: "103", gasVoteFloor: "B1", roleSkill: { type: "hacker_func", funcChoice: "operate", genes: { force: 6, speed: 0, load: 4 } }, submittedAt: "" } });
+  assert.throws(() => applyDeclaredSkill(makeRoom([h], 1), "h"), /速度/);
+});
+
+test("负重 0 无次元口袋时不能获得次元口袋（canGainItem）", () => {
+  const poor = makePlayer({ id: "a", load: 0, inventory: [] });
+  assert.equal(canGainItem(poor, "pocket").ok, false);
+  assert.equal(canGainItem(poor, "knife").ok, true); // 其他道具不受此限（超重另行处理）
+  const withPocket = makePlayer({ id: "b", load: 0, inventory: ["pocket"] });
+  assert.equal(canGainItem(withPocket, "pocket").ok, true); // 已持有则无悖论
+});
+
+test("负重 0 玩家抽到次元口袋会被退回房间库存，不被持有", () => {
+  // 直接构造已提交在 B503 的行动，避免移动校验干扰本用例。
+  const a = makePlayer({ id: "a", name: "A", orderCard: 1, location: "B503", load: 0, submittedAction: { round: 1, fromRoom: null, toRoom: "B503", gasVoteFloor: "B1", submittedAt: "" } });
+  let room = actionRoom([a]);
+  room.roomInventories = { B503: { pocket: 1 } };
+  room = drawItemsFromRoom(room, "B503", "a", 5);
+  const pa = room.players.find((p) => p.id === "a")!;
+  assert.ok(!pa.inventory.includes("pocket"), "负重 0 不应持有次元口袋");
+  assert.equal((room.roomInventories.B503 ?? {}).pocket, 1, "次元口袋退回库存");
+});
+
+console.log("v1.0.3 房间关闭统一拦截：");
+
+test("isRoomFunctionAvailable：关闭房间返回 false", () => {
+  const room = { ...makeRoom([makePlayer({ id: "a" })], 1), closedRooms: ["B204"] };
+  assert.equal(isRoomFunctionAvailable("B204", room), false);
+  assert.equal(isRoomFunctionAvailable("B202", room), true);
+});
+
+test("餐厅被黑客关闭后仍需上交水粮（不再免除）", () => {
+  // 第 1 轮（内部 2）；玩家在餐厅 B204 但餐厅被关闭，未预交水粮 → 扣 2。
+  const p = makePlayer({ id: "p", hp: 10, submittedAction: { round: 2, fromRoom: null, toRoom: "B204", gasVoteFloor: "B1", submittedAt: "" } });
+  const room = { ...makeRoom([p], 2), closedRooms: ["B204"] };
+  const r = buildResolutionPreview(room);
+  assert.equal(r.nextRoom.players[0].hp, 8); // 餐厅失效 → 水粮 -2
+});
+
+test("餐厅未被关闭时免水粮", () => {
+  const p = makePlayer({ id: "p", hp: 10, submittedAction: { round: 2, fromRoom: null, toRoom: "B204", gasVoteFloor: "B1", submittedAt: "" } });
+  const r = buildResolutionPreview(makeRoom([p], 2));
+  assert.equal(r.nextRoom.players[0].hp, 10);
+});
+
+test("手术室被黑客关闭后不回血且照常战斗", () => {
+  const a = makePlayer({ id: "a", hp: 5, force: 0, submittedAction: { round: 1, fromRoom: null, toRoom: "B202", gasVoteFloor: "B1", submittedAt: "" } });
+  const b = makePlayer({ id: "b", hp: 5, force: 3, submittedAction: { round: 1, fromRoom: null, toRoom: "B202", gasVoteFloor: "B1", submittedAt: "" } });
+  const room = { ...makeRoom([a, b], 1), closedRooms: ["B202"] };
+  const r = buildResolutionPreview(room);
+  // 关闭→不手术(+4)，2 人照常战斗：a 扣 3、b 不扣
+  assert.equal(r.nextRoom.players.find((p) => p.id === "a")!.hp, 2);
+  assert.equal(r.nextRoom.players.find((p) => p.id === "b")!.hp, 5);
+});
+
+console.log("v1.0.3 公开日志脱敏：");
+
+test("战斗公开只显示房间，不显示参战者/伤害；明细在裁判日志", () => {
+  const a = makePlayer({ id: "a", name: "A", force: 5, submittedAction: { round: 1, fromRoom: null, toRoom: "103", gasVoteFloor: "B1", submittedAt: "" } });
+  const b = makePlayer({ id: "b", name: "B", force: 2, submittedAction: { round: 1, fromRoom: null, toRoom: "103", gasVoteFloor: "B1", submittedAt: "" } });
+  const step = buildResolutionPreview(makeRoom([a, b], 1)).steps.find((s) => s.type === "combat")!;
+  assert.ok(step.logs.some((m) => /发生战斗/.test(m)), "公开含发生战斗");
+  assert.ok(!step.logs.some((m) => /战力|扣|vs/.test(m)), "公开不含参战者/伤害");
+  assert.ok((step.hostLogs ?? []).some((m) => /vs|扣/.test(m)), "裁判含明细");
+});
+
+test("火箭筒公开只显示被袭击房间，不显示发射者/伤害", () => {
+  const s = makePlayer({ id: "s", name: "S", inventory: ["rocket"], submittedAction: { round: 1, fromRoom: null, toRoom: "103", gasVoteFloor: "B1", rocketTargetRoom: "B302", submittedAt: "" } });
+  const v = makePlayer({ id: "v", name: "V", submittedAction: { round: 1, fromRoom: null, toRoom: "B302", gasVoteFloor: "B1", submittedAt: "" } });
+  const step = buildResolutionPreview(makeRoom([s, v], 1)).steps.find((st) => st.type === "rocket")!;
+  assert.ok(step.logs.some((m) => /遭到火箭筒袭击/.test(m)));
+  assert.ok(!step.logs.some((m) => /扣|发射|用火箭筒/.test(m)));
+  assert.ok((step.hostLogs ?? []).some((m) => /用火箭筒袭击/.test(m)));
+});
+
+test("结算最后统一公开各玩家最终生命值（finalHp 步骤）", () => {
+  const p = makePlayer({ id: "p", name: "P", hp: 7, submittedAction: { round: 1, fromRoom: null, toRoom: "103", gasVoteFloor: "B1", submittedAt: "" } });
+  const steps = buildResolutionPreview(makeRoom([p], 1)).steps;
+  const last = steps[steps.length - 1];
+  assert.equal(last.type, "finalHp");
+  assert.ok(last.logs.some((m) => /7 点生命/.test(m)));
+});
+
+console.log("v1.0.3 水粮预交模型 / 毒气投票末尾：");
+
+test("水粮预交：本轮 submitWater 结转为下一轮 waterPledged，下一轮结算才扣血", () => {
+  // 首轮（内部1）预交：行动末尾 submitWater/Food=true；进入第1轮（内部2）结算按预交处理。
+  // 需 ≥2 名存活玩家，否则结算会判定提前结束。
+  const p = makePlayer({ id: "p", name: "P", orderCard: 1, location: "B103", inventory: ["water", "food"] });
+  const q = makePlayer({ id: "q", name: "Q", orderCard: 2, location: "B103" });
+  let room = actionRoom([p, q], 1);
+  room = submitAction(room, "p", { toRoom: "B102", gasVoteFloor: "B1", submitWater: true, submitFood: true });
+  room = endTurn(room, "p");
+  room = submitAction(room, "q", { toRoom: "B104", gasVoteFloor: "B1" });
+  room = endTurn(room, "q");
+  // 进入结算并确认 → advanceToNextRound 结转 pledge
+  room = goToPhase(room, "RESOLUTION");
+  room = generateResolutionPreview(room);
+  room = confirmResolution(room);
+  const np = room.players.find((x) => x.id === "p")!;
+  assert.equal(np.waterPledged, true);
+  assert.equal(np.foodPledged, true);
+  assert.equal(room.currentRound, 2);
+});
+
+test("存活玩家未投毒气不能结束行动；投票后可结束", () => {
+  const a = makePlayer({ id: "a", name: "A", orderCard: 1, location: "B103" });
+  let room = actionRoom([a], 1);
+  room = submitAction(room, "a", { toRoom: "B102" }); // 不带毒气投票
+  assert.throws(() => endTurn(room, "a"), /毒气投票/);
+  room = reviseAction(room, "a", { gasVoteFloor: "B1" });
+  room = endTurn(room, "a");
+  assert.equal(room.players.find((p) => p.id === "a")!.endedAction, true);
+});
+
+console.log("v1.0.3 本地热座单个随机生成：");
+
+test("addRandomTestPlayer 生成 1 名玩家、角色唯一、速度≥1；座位满则报错", () => {
+  let room = createGame({ hostName: "房主", devMode: false });
+  const before = room.players.filter((p) => p.name).length;
+  room = addRandomTestPlayer(room);
+  const after = room.players.filter((p) => p.name).length;
+  assert.equal(after, before + 1);
+  const roles = room.players.filter((p) => p.name).map((p) => p.preferredRoleId);
+  assert.equal(new Set(roles).size, roles.length); // 角色唯一
+  const newest = room.players.filter((p) => p.name).find((p) => p.preferredRoleId && p.speed >= 1);
+  assert.ok(newest, "生成的玩家速度≥1");
+  // 填满 9 人后再添加应报错
+  while (room.players.some((p) => !p.name)) room = addRandomTestPlayer(room);
+  assert.throws(() => addRandomTestPlayer(room), /座位已满/);
 });
 
 console.log(`\n结果：${passed} 通过，${failed} 失败`);

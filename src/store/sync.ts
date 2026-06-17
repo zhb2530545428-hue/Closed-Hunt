@@ -5,6 +5,7 @@ import type { GameRoom } from "@/game/types";
 import type { JoinResult, RoomEnvelope, RoomSnapshot } from "@/shared/sync";
 import { MAX_SNAPSHOTS, SNAPSHOT_PHASES } from "@/shared/sync";
 import { createGame, joinGame } from "@/game/engine";
+import { formatRoundLabel } from "@/game/config/rounds";
 
 export interface SnapshotMeta {
   index: number;
@@ -56,7 +57,7 @@ function localMaybeSnapshot(prev: GameRoom | undefined, next: GameRoom, snaps: R
   return [
     ...snaps,
     {
-      label: `第 ${next.currentRound} 轮 · ${next.currentPhase}`,
+      label: `${formatRoundLabel(next.currentRound)} · ${next.currentPhase}`,
       round: next.currentRound,
       phase: next.currentPhase,
       room: next,

@@ -4,7 +4,24 @@
 import type { GameRoom, Player, Trade } from "../types";
 import { appendLog, nowISO, uid } from "./helpers";
 import { getItemName } from "../config/items";
-import { isOverweight } from "../inventory";
+import { isOverweight, canGainItem } from "../inventory";
+import { roleName } from "../utils/names";
+
+/**
+ * 校验顺位卡唯一性（v1.0.2 §2）：每名存活在座玩家必须恰好持有 1 张顺位卡，且全场不重复。
+ * 顺位卡只能在玩家间「交换」（见 createTrade / respondTrade），交换保持顺位卡集合不变，
+ * 因此该不变式在任意交易后都应成立；不成立则说明数据异常，应阻止并回滚。
+ */
+export function validateTurnOrderCards(room: GameRoom): { ok: boolean; reason?: string } {
+  const alive = room.players.filter((p) => p.name && p.status === "alive");
+  const seen = new Set<number>();
+  for (const p of alive) {
+    if (p.orderCard == null) return { ok: false, reason: `${p.name} 缺少顺位卡。` };
+    if (seen.has(p.orderCard)) return { ok: false, reason: `顺位卡 ${p.orderCard} 被多名玩家持有。` };
+    seen.add(p.orderCard);
+  }
+  return { ok: true };
+}
 
 function replacePlayers(room: GameRoom, updated: Player[]): GameRoom {
   const map = new Map(updated.map((p) => [p.id, p]));
@@ -46,14 +63,21 @@ export function createTrade(room: GameRoom, fromPlayerId: string, input: TradeIn
 
   const offerItems = input.offerItems ?? [];
   const requestItems = input.requestItems ?? [];
-  const offerOrderCard = !!input.offerOrderCard;
-  const requestOrderCard = !!input.requestOrderCard;
+  // §2：顺位卡只能「交换」，禁止单向赠予（单向赠予会导致某人 0 张、某人 2 张）。
+  // 任一方勾选顺位卡即统一视为双方交换各自的顺位卡。
+  let offerOrderCard = !!input.offerOrderCard;
+  let requestOrderCard = !!input.requestOrderCard;
+  if (offerOrderCard || requestOrderCard) {
+    offerOrderCard = true;
+    requestOrderCard = true;
+  }
 
   if (offerItems.length === 0 && requestItems.length === 0 && !offerOrderCard && !requestOrderCard) {
     throw new Error("交易内容不能为空。");
   }
   if (!hasAllItems(from, offerItems)) throw new Error("你没有要给出的全部道具。");
-  if (offerOrderCard && from.orderCard == null) throw new Error("你当前没有顺位卡可给出。");
+  if (offerOrderCard && from.orderCard == null) throw new Error("你当前没有顺位卡可交换。");
+  if (requestOrderCard && to.orderCard == null) throw new Error("对方当前没有顺位卡可交换。");
 
   const trade: Trade = {
     id: uid("trade_"),
@@ -70,7 +94,7 @@ export function createTrade(room: GameRoom, fromPlayerId: string, input: TradeIn
   };
 
   let next: GameRoom = { ...room, trades: [...room.trades, trade], updatedAt: nowISO() };
-  next = appendLog(next, `${from.name} 向 ${to.name} 发起一笔交易请求。`);
+  next = appendLog(next, `${roleName(from)} 向 ${roleName(to)} 发起一笔交易请求。`);
   return next;
 }
 
@@ -82,6 +106,8 @@ function setTradeStatus(room: GameRoom, tradeId: string, status: Trade["status"]
 
 /** 对方响应交易：接受则自动转移并双方负重检查；拒绝则关闭。 */
 export function respondTrade(room: GameRoom, tradeId: string, accept: boolean): GameRoom {
+  // §2.4.7：行动阶段开始后禁止继续交易顺位卡（交易仅在自由阶段有效）。
+  if (room.currentPhase !== "FREE") throw new Error("仅能在自由阶段处理交易。");
   const trade = room.trades.find((t) => t.id === tradeId);
   if (!trade) throw new Error("交易不存在。");
   if (trade.status !== "pending") throw new Error("该交易已处理。");
@@ -92,7 +118,7 @@ export function respondTrade(room: GameRoom, tradeId: string, accept: boolean): 
 
   if (!accept) {
     let next: GameRoom = { ...room, trades: setTradeStatus(room, tradeId, "rejected"), updatedAt: nowISO() };
-    next = appendLog(next, `${to.name} 拒绝了 ${from.name} 的交易。`);
+    next = appendLog(next, `${roleName(to)} 拒绝了 ${roleName(from)} 的交易。`);
     return next;
   }
 
@@ -101,6 +127,15 @@ export function respondTrade(room: GameRoom, tradeId: string, accept: boolean): 
   if (!hasAllItems(to, trade.requestItems)) throw new Error("你没有对方索取的全部道具。");
   if (trade.offerOrderCard && from.orderCard == null) throw new Error("发起方没有顺位卡，交易失效。");
   if (trade.requestOrderCard && to.orderCard == null) throw new Error("你没有顺位卡可给出。");
+  // v1.0.3 §5.3：负重 0 无次元口袋的一方不能通过交易获得次元口袋。
+  for (const id of trade.offerItems) {
+    const c = canGainItem(to, id);
+    if (!c.ok) throw new Error(`${roleName(to)}：${c.reason}`);
+  }
+  for (const id of trade.requestItems) {
+    const c = canGainItem(from, id);
+    if (!c.ok) throw new Error(`${roleName(from)}：${c.reason}`);
+  }
 
   const nf: Player = { ...from, inventory: [...from.inventory] };
   const nt: Player = { ...to, inventory: [...to.inventory] };
@@ -114,22 +149,25 @@ export function respondTrade(room: GameRoom, tradeId: string, accept: boolean): 
     nt.inventory.splice(nt.inventory.indexOf(id), 1);
     nf.inventory.push(id);
   }
-  // 顺位卡转移 / 交换
-  if (trade.offerOrderCard && trade.requestOrderCard) {
+  // 顺位卡只能「交换」（§2）：双方互换各自顺位卡，保持全场顺位卡集合不变，杜绝复制/堆叠/丢失。
+  const involvesOrderCard = trade.offerOrderCard || trade.requestOrderCard;
+  if (involvesOrderCard) {
+    if (nf.orderCard == null || nt.orderCard == null) {
+      throw new Error("顺位卡交换失效：双方需各持 1 张顺位卡。");
+    }
     const tmp = nf.orderCard;
     nf.orderCard = nt.orderCard;
     nt.orderCard = tmp;
-  } else if (trade.offerOrderCard) {
-    nt.orderCard = nf.orderCard;
-    nf.orderCard = null;
-  } else if (trade.requestOrderCard) {
-    nf.orderCard = nt.orderCard;
-    nt.orderCard = null;
   }
 
   let next = replacePlayers(room, [nf, nt]);
   next = { ...next, trades: setTradeStatus(next, tradeId, "accepted") };
-  next = appendLog(next, `${to.name} 接受了与 ${from.name} 的交易，物品已转移。`);
+  // §2.4.4/2.4.5：交易完成后立即校验顺位卡唯一性，异常则阻止并回滚（纯函数抛错即回滚乐观更新）。
+  if (involvesOrderCard) {
+    const check = validateTurnOrderCards(next);
+    if (!check.ok) throw new Error(`顺位卡校验失败：${check.reason}`);
+  }
+  next = appendLog(next, `${roleName(to)} 接受了与 ${roleName(from)} 的交易，物品已转移。`);
 
   const offerText = [
     ...trade.offerItems.map(getItemName),
@@ -139,10 +177,10 @@ export function respondTrade(room: GameRoom, tradeId: string, accept: boolean): 
     ...trade.requestItems.map(getItemName),
     ...(trade.requestOrderCard ? ["顺位卡"] : []),
   ].join("、");
-  next = appendLog(next, `  ${from.name} 给出：${offerText || "（无）"}；${to.name} 给出：${requestText || "（无）"}。`);
+  next = appendLog(next, `  ${roleName(from)} 给出：${offerText || "（无）"}；${roleName(to)} 给出：${requestText || "（无）"}。`);
 
-  if (isOverweight(nf)) next = appendLog(next, `  ${nf.name} 交易后超重，请在行动前丢弃多余道具。`);
-  if (isOverweight(nt)) next = appendLog(next, `  ${nt.name} 交易后超重，请在行动前丢弃多余道具。`);
+  if (isOverweight(nf)) next = appendLog(next, `  ${roleName(nf)} 交易后超重，请在行动前丢弃多余道具。`);
+  if (isOverweight(nt)) next = appendLog(next, `  ${roleName(nt)} 交易后超重，请在行动前丢弃多余道具。`);
   return next;
 }
 
@@ -153,7 +191,7 @@ export function cancelTrade(room: GameRoom, tradeId: string): GameRoom {
   if (trade.status !== "pending") throw new Error("该交易已处理，无法取消。");
   const from = room.players.find((p) => p.id === trade.fromPlayerId);
   let next: GameRoom = { ...room, trades: setTradeStatus(room, tradeId, "cancelled"), updatedAt: nowISO() };
-  next = appendLog(next, `${from?.name ?? "玩家"} 的交易已取消。`);
+  next = appendLog(next, `${from ? roleName(from) : "玩家"} 的交易已取消。`);
   return next;
 }
 

@@ -24,7 +24,7 @@ export function nowISO(): string {
 export function makeLog(
   room: GameRoom,
   message: string,
-  visibility: "public" | "private" = "public",
+  visibility: "public" | "private" | "host" = "public",
   playerId?: string
 ): GameLog {
   return {
@@ -59,6 +59,19 @@ export function appendPrivateLog(
   ...messages: string[]
 ): GameRoom {
   const logs = messages.map((m) => makeLog(room, m, "private", playerId));
+  return {
+    ...room,
+    publicLogs: [...room.publicLogs, ...logs],
+    updatedAt: nowISO(),
+  };
+}
+
+/**
+ * 追加【房主裁判】日志（仅房主视图可见）。
+ * 用于毒气票数明细等不应公开、也不专属某玩家的裁判信息（v1.0.2 §4 C / §5）。
+ */
+export function appendHostLog(room: GameRoom, ...messages: string[]): GameRoom {
+  const logs = messages.map((m) => makeLog(room, m, "host"));
   return {
     ...room,
     publicLogs: [...room.publicLogs, ...logs],

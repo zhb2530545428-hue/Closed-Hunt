@@ -6,6 +6,7 @@ import type { GameRoom } from "@/game/types";
 import type { JoinResult, RoomEnvelope, RoomSnapshot, RoomTokens } from "@/shared/sync";
 import { MAX_SNAPSHOTS, SNAPSHOT_PHASES } from "@/shared/sync";
 import { createGame, joinGame } from "@/game/engine";
+import { formatRoundLabel } from "@/game/config/rounds";
 import { randomUUID } from "crypto";
 
 /** 业务错误，路由层据 code 映射 HTTP 状态。 */
@@ -85,7 +86,7 @@ function maybeSnapshot(prev: GameRoom, next: GameRoom, snapshots: RoomSnapshot[]
   if (!phaseChanged) return snapshots;
   if (!SNAPSHOT_PHASES.includes(next.currentPhase as (typeof SNAPSHOT_PHASES)[number])) return snapshots;
   const snap: RoomSnapshot = {
-    label: `第 ${next.currentRound} 轮 · ${next.currentPhase}`,
+    label: `${formatRoundLabel(next.currentRound)} · ${next.currentPhase}`,
     round: next.currentRound,
     phase: next.currentPhase,
     room: next,

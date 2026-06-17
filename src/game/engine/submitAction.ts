@@ -100,9 +100,10 @@ export function submitAction(
     throw new Error(preview.reason ?? "移动不合法。");
   }
 
+  // v1.0.3 §7.2：毒气投票移到行动末尾（确认移动→抽卡→准备→毒气投票→结束）。
+  // 提交移动时毒气投票可暂缺，由 reviseAction 在行动末尾补交；endTurn 会校验存活玩家已投票。
   let gasVoteFloor: string | null = null;
-  if (isAlive) {
-    if (!input.gasVoteFloor) throw new Error("请选择毒气投票楼层。");
+  if (isAlive && input.gasVoteFloor) {
     if (!FLOOR_IDS.includes(input.gasVoteFloor)) throw new Error("非法的毒气投票楼层。");
     gasVoteFloor = input.gasVoteFloor;
   }
@@ -214,13 +215,26 @@ export function reviseAction(
     submitWater?: boolean;
     submitFood?: boolean;
     roomAction?: string;
+    /** 行动末尾补交毒气投票（v1.0.3 §7.2） */
+    gasVoteFloor?: string | null;
+    /** 仅用于结算时生效的技能（饮品师果汁分配）；移动阶段已生效的技能不在此覆盖 */
+    roleSkill?: RoleSkillInput;
   }
 ): GameRoom {
   if (room.currentPhase !== "ACTION") throw new Error("当前不是行动阶段。");
   const player = room.players.find((p) => p.id === playerId);
   if (!player || !player.submittedAction) throw new Error("请先提交行动。");
+  if (player.endedAction) throw new Error("你已结束本轮行动，无法再修改。");
+  if (patch.gasVoteFloor != null && !FLOOR_IDS.includes(patch.gasVoteFloor)) {
+    throw new Error("非法的毒气投票楼层。");
+  }
 
   const a = player.submittedAction;
+  // 仅允许在 reviseAction 更新「果汁」类技能（结算时生效），避免覆盖移动阶段已落地的技能。
+  const nextRoleSkill =
+    patch.roleSkill !== undefined && (patch.roleSkill === undefined || patch.roleSkill.type === "juice")
+      ? patch.roleSkill
+      : a.roleSkill;
   const updated: Player = {
     ...player,
     submittedAction: {
@@ -233,6 +247,8 @@ export function reviseAction(
       submitWater: patch.submitWater !== undefined ? patch.submitWater : a.submitWater,
       submitFood: patch.submitFood !== undefined ? patch.submitFood : a.submitFood,
       roomAction: patch.roomAction !== undefined ? patch.roomAction : a.roomAction,
+      gasVoteFloor: patch.gasVoteFloor !== undefined ? patch.gasVoteFloor : a.gasVoteFloor,
+      roleSkill: nextRoleSkill,
     },
   };
   return {

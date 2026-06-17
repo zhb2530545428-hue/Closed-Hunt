@@ -90,6 +90,19 @@ export function overweightAmount(player: Player): number {
   return Math.max(0, getInventoryWeight(player) - getCarryLimit(player));
 }
 
+/**
+ * 玩家能否获得某张道具（v1.0.3 §5.3 统一校验）。
+ * 当前唯一限制：负重为 0 且未持有次元口袋时，不能获得次元口袋——
+ * 否则会出现「靠拿到次元口袋本身来绕过负重 0 无法拾起任何道具」的悖论。
+ * 抽卡、交易、赠予、回收装置、停尸间等所有获得道具路径都应经过本判断。
+ */
+export function canGainItem(player: Player, itemId: string): { ok: boolean; reason?: string } {
+  if (normalizeItemId(itemId) === POCKET && player.load === 0 && !hasPocket(player)) {
+    return { ok: false, reason: "负重为 0 且没有次元口袋时，无法获得次元口袋。" };
+  }
+  return { ok: true };
+}
+
 import type { GameRoom } from "./types";
 
 function migrateIdList(list: string[] | undefined): string[] | undefined {

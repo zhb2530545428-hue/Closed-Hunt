@@ -1,6 +1,8 @@
 // 房间功能配置。来源：规则手册 14.1 房间功能表。
 // v0.1 用于展示房间功能与抽卡上限；抽卡/库存结算留待 v0.2。
 
+import type { GameRoom } from "../types";
+
 export interface RoomFunctionConfig {
   roomId: string;
   name: string;
@@ -46,4 +48,15 @@ export function getDrawLimit(roomId: string): number {
 /** 该房间是否可常规抽卡（库存型房间，排除停机坪特殊与无库存功能房间） */
 export function isDrawRoom(roomId: string): boolean {
   return getDrawLimit(roomId) > 0;
+}
+
+/**
+ * 房间功能本轮是否可用（v1.0.3 §6 统一封装）。
+ * 黑客关闭某房间后，本轮该房间不能抽卡、不能使用房间功能、不产生任何功能性收益
+ * （含餐厅免水粮、手术室回血、各类抽卡、空投、基因库/控制室/操作室等）。
+ * 所有房间功能 / 抽卡 / 免水粮 / 回血 / 空投 / 基因调整都必须经过本判断，避免各处零散判断漏掉。
+ * 注意：经过型效果（102 激光室）不属于「房间功能」，不受关闭影响（规则 7.3）。
+ */
+export function isRoomFunctionAvailable(roomId: string, room: GameRoom): boolean {
+  return !(room.closedRooms ?? []).includes(roomId);
 }
