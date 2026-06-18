@@ -28,9 +28,9 @@ import {
   toggleGasFloor,
   toggleClearedRoom,
   cancelTrade,
+  missingSettlementConfirmers,
 } from "@/game/engine";
 import type { SnapshotMeta } from "@/store/sync";
-import { getInventoryWeight } from "@/game/inventory";
 import { getRole } from "@/game/config/roles";
 import { FLOORS, getFloorLabel } from "@/game/config/floors";
 import { getItemName, ITEMS } from "@/game/config/items";
@@ -63,7 +63,9 @@ export default function BoardPage() {
     try {
       apply(code, fn);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg);
+      if (msg.includes("未确认结算资源选择")) window.alert(msg);
     }
   };
 
@@ -128,7 +130,7 @@ export default function BoardPage() {
   );
 }
 
-function PlayersBoard({ room, seated, isHost }: { room: GameRoom; seated: Player[]; isHost: boolean }) {
+function PlayersBoard({ room, seated }: { room: GameRoom; seated: Player[]; isHost: boolean }) {
   // §12：按本轮顺位升序（暗影无顺位卡，排末尾）。准备阶段无顺位则按座位号。
   const ordered = [...seated].sort((a, b) => {
     const oa = a.orderCard ?? 999;
@@ -139,10 +141,7 @@ function PlayersBoard({ room, seated, isHost }: { room: GameRoom; seated: Player
   return (
     <Card title="玩家（按本轮顺位）">
       <div className="space-y-2">
-        {ordered.map((p) => {
-          const counts: Record<string, number> = {};
-          for (const id of p.inventory) counts[id] = (counts[id] ?? 0) + 1;
-          return (
+        {ordered.map((p) => (
             <div key={p.id} className="bg-ink-700 rounded px-3 py-2">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
@@ -160,40 +159,77 @@ function PlayersBoard({ room, seated, isHost }: { room: GameRoom; seated: Player
                   {isAction && (p.endedAction ? <Badge tone="toxic">已行动</Badge> : <Badge>待行动</Badge>)}
                 </div>
               </div>
-              {isHost && (
-                <div className="text-[11px] text-slate-400 mt-1">
-                  {getRole(p.roleId)?.name} · 在 {p.location ? getRoomLabel(p.location) : "—"} · 负重 {getInventoryWeight(p)}/{p.load} ·
-                  {p.inventory.length === 0 ? " 无道具" : " " + Object.entries(counts).map(([id, n]) => `${getItemName(id)}×${n}`).join("、")}
-                  {p.submittedAction ? ` · 去 ${getRoomLabel(p.submittedAction.toRoom)}` : ""}
-                  {(p.roleUses ?? 0) > 0 ? ` · 技能用 ${p.roleUses}` : ""}
-                </div>
-              )}
             </div>
-          );
-        })}
+        ))}
       </div>
-      {!isHost && <p className="text-[11px] text-slate-500 mt-2">玩家道具为私密信息，仅房主可见。</p>}
+      <p className="text-[11px] text-slate-500 mt-2">位置、移动目标和手牌为私密信息；房主可在下方裁判工具中查看完整明细。</p>
     </Card>
   );
 }
 
 function LogPanel({ room }: { room: GameRoom }) {
   // §13：仅展示公开日志；行动阶段产生的私密日志（移动/抽卡/技能）不在公共看板出现。
-  const logs = room.publicLogs.filter((l) => l.visibility === "public").reverse();
+  const logs = room.publicLogs.filter((l) => l.visibility === "public");
+  const grouped = groupPublicLogs(logs);
   return (
     <Card title="公开日志">
       <p className="text-[11px] text-slate-500 mb-1">行动阶段的移动/抽卡/技能为私密信息，结算后才会公开。</p>
-      <div className="space-y-1 max-h-[420px] overflow-y-auto text-sm">
+      <div className="space-y-2 max-h-[420px] overflow-y-auto text-sm">
         {logs.length === 0 && <p className="text-slate-500">暂无日志。</p>}
-        {logs.map((l) => (
-          <div key={l.id} className="text-slate-300">
-            <span className="text-slate-500 text-xs mr-2">[{formatRoundLabel(l.round)}·{PHASE_INFO[l.phase]?.label ?? l.phase}]</span>
-            {l.message}
+        {grouped.map((g) => (
+          <div key={g.key} className="bg-ink-700/70 border border-ink-600 rounded p-2">
+            <div className="text-xs text-gold mb-1">{g.title}</div>
+            <div className="space-y-1">
+              {g.items.map((l) => (
+                <div key={l.id} className="text-slate-300">{l.message}</div>
+              ))}
+            </div>
           </div>
         ))}
       </div>
     </Card>
   );
+}
+
+const LOG_PHASE_LABEL: Record<string, string> = {
+  initial_spawn_resolution: "首轮出生结算",
+  free_phase: "自由阶段",
+  action_phase: "行动阶段",
+  resolution_room: "结算阶段：房间事件",
+  resolution_combat: "结算阶段：战斗 / 乱斗",
+  resolution_shadow: "结算阶段：暗影",
+  resolution_rocket: "结算阶段：火箭筒",
+  resolution_gas: "结算阶段：毒气",
+  resolution_supply: "结算阶段：水粮",
+  resolution_item_status: "结算阶段：道具 / 状态",
+  resolution_death_revival: "结算阶段：死亡 / 复活",
+  final: "最终结算",
+};
+
+function fallbackLogPhase(l: GameRoom["publicLogs"][number]): string {
+  if (l.logPhase) return l.logPhase;
+  if (l.phase === "SPAWN_COMBAT") return "initial_spawn_resolution";
+  if (l.phase === "FREE") return "free_phase";
+  if (l.phase === "ACTION") return "action_phase";
+  if (l.phase === "GAME_OVER") return "final";
+  return "resolution_item_status";
+}
+
+function groupPublicLogs(logs: GameRoom["publicLogs"]) {
+  const groups = new Map<string, { key: string; title: string; items: GameRoom["publicLogs"] }>();
+  for (const l of logs) {
+    const phaseKey = fallbackLogPhase(l);
+    const key = `${l.round}:${phaseKey}`;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        title: `${formatRoundLabel(l.round)} · ${LOG_PHASE_LABEL[phaseKey] ?? PHASE_INFO[l.phase]?.label ?? l.phase}`,
+        items: [],
+      });
+    }
+    groups.get(key)!.items.push(l);
+  }
+  return Array.from(groups.values()).reverse();
 }
 
 function PreviewPanel({ room }: { room: GameRoom }) {
@@ -242,12 +278,15 @@ function PreviewPanel({ room }: { room: GameRoom }) {
 
 function HostConsole({ room, seated, run, code }: { room: GameRoom; seated: Player[]; run: (fn: (r: GameRoom) => GameRoom) => void; code: string }) {
   const [logText, setLogText] = useState("");
+  const isSpawnCombat = room.currentPhase === "SPAWN_COMBAT";
   const isResolution = room.currentPhase === "RESOLUTION";
+  const canPreview = isSpawnCombat || isResolution;
   const isOver = room.currentPhase === "GAME_OVER";
 
   // 毒气投票实时统计（仅房主参考）
   const gas = tallyGasVotes(room.players, room.gasFloors);
   const rocketTargets = seated.filter((p) => p.status === "alive" && p.inventory.includes("rocket") && p.submittedAction?.rocketTargetRoom);
+  const missingConfirmers = room.currentPhase === "RESOLUTION" ? missingSettlementConfirmers(room) : [];
 
   return (
     <Card title="房主控制台" className="mt-4">
@@ -255,12 +294,20 @@ function HostConsole({ room, seated, run, code }: { room: GameRoom; seated: Play
         <Button onClick={() => run((r) => goToPhase(r, "FREE"))} disabled={isOver}>进入自由阶段</Button>
         <Button onClick={() => run((r) => goToPhase(r, "ACTION"))} disabled={isOver}>进入行动阶段</Button>
         <Button onClick={() => run((r) => goToPhase(r, "RESOLUTION"))} disabled={isOver}>进入结算阶段</Button>
-        <Button variant="gold" disabled={!isResolution} onClick={() => run((r) => generateResolutionPreview(r))}>生成结算预览</Button>
-        <Button variant="primary" disabled={!isResolution || !room.resolutionPreview} onClick={() => run((r) => confirmResolution(r))}>
-          确认应用结算 → {room.currentRound >= TOTAL_ROUNDS ? "最终结算" : "下一轮"}
+        <Button variant="gold" disabled={!canPreview} onClick={() => run((r) => generateResolutionPreview(r))}>
+          {isSpawnCombat ? "生成首轮出生战斗预览" : "生成结算预览"}
+        </Button>
+        <Button variant="primary" disabled={!canPreview || !room.resolutionPreview} onClick={() => run((r) => confirmResolution(r))}>
+          {isSpawnCombat ? "确认首轮结算 → 第 1 轮" : `确认应用结算 → ${room.currentRound >= TOTAL_ROUNDS ? "最终结算" : "下一轮"}`}
         </Button>
         <Button variant="danger" disabled={isOver} onClick={() => run((r) => endGame(r))}>结束游戏</Button>
       </div>
+
+      {missingConfirmers.length > 0 && (
+        <div className="mb-3 text-xs text-amber-300 bg-amber-900/20 border border-amber-700 rounded p-2">
+          等待结算资源确认：{missingConfirmers.map(roleWithNick).join("、")}
+        </div>
+      )}
 
       {room.currentPhase === "ACTION" && (
         <p className="text-xs text-slate-400 mb-3">{allSubmitted(room) ? "所有玩家已提交，可进入结算阶段。" : "等待玩家提交行动……"}</p>

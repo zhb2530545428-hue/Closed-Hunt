@@ -1,6 +1,6 @@
 // 引擎共用辅助函数
 
-import type { GameLog, GamePhase, GameRoom, Player } from "../types";
+import type { GameLog, GamePhase, GameRoom, LogPhase, Player } from "../types";
 
 export function uid(prefix = ""): string {
   return prefix + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
@@ -25,13 +25,15 @@ export function makeLog(
   room: GameRoom,
   message: string,
   visibility: "public" | "private" | "host" = "public",
-  playerId?: string
+  playerId?: string,
+  logPhase?: LogPhase
 ): GameLog {
   return {
     id: uid("log_"),
     round: room.currentRound,
     phase: room.currentPhase,
     visibility,
+    logPhase,
     playerId,
     message,
     createdAt: nowISO(),

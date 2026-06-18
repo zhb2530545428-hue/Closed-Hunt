@@ -13,7 +13,7 @@ import { roundGasDamage, FOOD_WATER_START_ROUND, formatRoundLabel } from "../con
 import { getRoomLabel } from "../config/rooms";
 import { getFloorLabel } from "../config/floors";
 import { getItemName, weaponBonusOf, isWeaponItem, normalizeItemId } from "../config/items";
-import { isRoomFunctionAvailable } from "../config/roomFunctions";
+import { isRoomFunctionDisabledForAction, isRoomFunctionDisabledForResolution, isResolutionRoomFunction } from "../config/roomFunctions";
 import { invAdd, canGainItem } from "../inventory";
 import { isRoomGassed } from "../gas";
 import { computeCombatDamage, type Combatant } from "./combat";
@@ -107,8 +107,11 @@ function stepRoomEffects(draft: GameRoom, round: number): ResolutionStep {
 
   for (const p of alive) {
     const room = roomOf(p);
-    // §6：黑客关闭的房间本轮不产生任何功能性收益（仅私密告知进入者，不公开是哪个房间被关）。
-    if (!isRoomFunctionAvailable(room, draft)) {
+    // 黑客关闭：行动即时效果按关闭顺位判断；结算效果按本轮是否关闭判断。
+    const disabled = isResolutionRoomFunction(room)
+      ? isRoomFunctionDisabledForResolution(room, draft)
+      : isRoomFunctionDisabledForAction(room, draft, p);
+    if (disabled) {
       privateLogs.push({
         playerId: p.id,
         text: `你本轮所在的 ${getRoomLabel(room)} 功能被关闭，无法触发房间效果或抽取道具。`,
@@ -127,7 +130,7 @@ function stepRoomEffects(draft: GameRoom, round: number): ResolutionStep {
   }
 
   // 手术室 B202：恰好 2 人，每人 +4 且不战斗（规则 14.1）；被黑客关闭则失效。
-  const surgery = !isRoomFunctionAvailable("B202", draft) ? [] : aliveIn(draft.players, "B202");
+  const surgery = isRoomFunctionDisabledForResolution("B202", draft) ? [] : aliveIn(draft.players, "B202");
   if (surgery.length === 2) {
     for (const p of surgery) {
       const g = heal(p, 4);
@@ -141,7 +144,7 @@ function stepRoomEffects(draft: GameRoom, round: number): ResolutionStep {
   return { type: "roomEffects", title: "1. 房间效果", logs, hostLogs, privateLogs, effects };
 }
 
-function stepCombat(draft: GameRoom, round: number): ResolutionStep {
+function stepCombat(draft: GameRoom, round: number, includeCarrier = true): ResolutionStep {
   const effects: ResolutionEffect[] = [];
   // §4.2：公开只显示「哪个房间发生战斗 / 乱斗」，不显示参战者、谁打谁、谁扣几点血。
   const logs: string[] = [];
@@ -153,7 +156,7 @@ function stepCombat(draft: GameRoom, round: number): ResolutionStep {
     const fighters = aliveIn(draft.players, roomId);
     if (fighters.length < 2) continue;
     // 手术室恰好 2 人不战斗（已在房间效果 +4）；被黑客关闭则照常战斗
-    if (roomId === "B202" && fighters.length === 2 && isRoomFunctionAvailable("B202", draft)) continue;
+    if (roomId === "B202" && fighters.length === 2 && !isRoomFunctionDisabledForResolution("B202", draft)) continue;
 
     const combatants: Combatant[] = fighters.map((p) => ({
       id: p.id,
@@ -182,23 +185,25 @@ function stepCombat(draft: GameRoom, round: number): ResolutionStep {
 
   // 病毒携带者：与战斗同时结算。同房间其他存活玩家额外扣 N（其他存活数）并叠加感染标记；
   // 初始轮（第 1 轮）仅叠加标记，无伤害。规则 3.2。位置/伤害敏感——仅裁判与本人可见。
-  const carriers = draft.players.filter((p) => p.status === "alive" && p.roleId === "carrier");
-  for (const carrier of carriers) {
-    const room = roomOf(carrier);
-    const others = aliveIn(draft.players, room).filter((p) => p.id !== carrier.id);
-    if (others.length === 0) continue;
-    const n = others.length;
-    hostLogs.push(`病毒携带者 ${nm(carrier)} 在 ${getRoomLabel(room)} 对 ${n} 名存活玩家施加感染${round <= 1 ? "（初始轮仅标记）" : `（各 -${n}）`}。`);
-    for (const v of others) {
-      v.infection = (v.infection ?? 0) + 1;
-      if (round > 1) {
-        const dealt = applyDamage(v, n, round);
-        effects.push({ playerId: v.id, roomId: room, hpChange: -dealt, reason: `病毒感染 -${n}` });
-        hostLogs.push(`  ${nm(v)} 受感染扣 ${dealt} 点生命（感染层数 ${v.infection}）。`);
-        privateLogs.push({ playerId: v.id, text: `你被病毒感染扣 ${dealt} 点生命（感染层数 ${v.infection}）。` });
-      } else {
-        hostLogs.push(`  ${nm(v)} 叠加感染标记（层数 ${v.infection}）。`);
-        privateLogs.push({ playerId: v.id, text: `你被叠加 1 层感染标记（层数 ${v.infection}）。` });
+  if (includeCarrier) {
+    const carriers = draft.players.filter((p) => p.status === "alive" && p.roleId === "carrier");
+    for (const carrier of carriers) {
+      const room = roomOf(carrier);
+      const others = aliveIn(draft.players, room).filter((p) => p.id !== carrier.id);
+      if (others.length === 0) continue;
+      const n = others.length;
+      hostLogs.push(`病毒携带者 ${nm(carrier)} 在 ${getRoomLabel(room)} 对 ${n} 名存活玩家施加感染${round <= 1 ? "（初始轮仅标记）" : `（各 -${n}）`}。`);
+      for (const v of others) {
+        v.infection = (v.infection ?? 0) + 1;
+        if (round > 1) {
+          const dealt = applyDamage(v, n, round);
+          effects.push({ playerId: v.id, roomId: room, hpChange: -dealt, reason: `病毒感染 -${n}` });
+          hostLogs.push(`  ${nm(v)} 受感染扣 ${dealt} 点生命（感染层数 ${v.infection}）。`);
+          privateLogs.push({ playerId: v.id, text: `你被病毒感染扣 ${dealt} 点生命（感染层数 ${v.infection}）。` });
+        } else {
+          hostLogs.push(`  ${nm(v)} 叠加感染标记（层数 ${v.infection}）。`);
+          privateLogs.push({ playerId: v.id, text: `你被叠加 1 层感染标记（层数 ${v.infection}）。` });
+        }
       }
     }
   }
@@ -215,7 +220,7 @@ function stepShadow(draft: GameRoom): ResolutionStep {
   const privateLogs: Array<{ playerId: string; text: string }> = [];
 
   // 暗影使者免疫被吸血（不计入被吸对象，暗影也不因其增加吸血量）。规则 3.2。
-  let envoyHeals = 0; // 本步骤内暗影吸血「次数」，每次令存活的暗影使者 +1
+  let envoyHeals = 0; // 本步骤内暗影实际吸到的生命点数。
 
   const rooms = new Set(draft.players.filter((p) => p.status === "shadow").map(roomOf));
   for (const roomId of rooms) {
@@ -229,6 +234,7 @@ function stepShadow(draft: GameRoom): ResolutionStep {
       p.hp = Math.max(0, p.hp - shadows.length);
       const dealt = before - p.hp;
       if (dealt > 0) {
+        envoyHeals += dealt;
         effects.push({ playerId: p.id, roomId, hpChange: -dealt, reason: `暗影吸血 x${shadows.length}` });
         privateLogs.push({ playerId: p.id, text: `你在 ${getRoomLabel(roomId)} 被暗影吸取 ${dealt} 点生命。` });
       }
@@ -236,7 +242,6 @@ function stepShadow(draft: GameRoom): ResolutionStep {
     for (const s of shadows) {
       s.shadowDrainCount += victims.length;
       s.lastDrainRoomId = roomId;
-      envoyHeals += victims.length; // 每名暗影对每名存活玩家各吸 1，计为一次吸血事件
       effects.push({ playerId: s.id, roomId, reason: `吸血 +${victims.length}（累计 ${s.shadowDrainCount}）` });
       privateLogs.push({ playerId: s.id, text: `你在 ${getRoomLabel(roomId)} 吸取 ${victims.length} 点生命（累计 ${s.shadowDrainCount}）。` });
     }
@@ -244,7 +249,7 @@ function stepShadow(draft: GameRoom): ResolutionStep {
     hostLogs.push(`${getRoomLabel(roomId)}：${shadows.length} 暗影吸取 ${victims.length} 名存活玩家，每人 -${shadows.length}。`);
   }
 
-  // 暗影使者：存活状态下，每当其他暗影吸取生命，恢复 1 点生命（按吸血事件计）。
+  // 暗影使者：按本步骤内暗影实际吸到的生命点数恢复。
   if (envoyHeals > 0) {
     for (const p of draft.players) {
       if (p.status === "alive" && p.roleId === "shadow_envoy") {
@@ -377,7 +382,7 @@ function stepWaterFood(draft: GameRoom, round: number): ResolutionStep {
     if (p.status !== "alive") continue;
     const room = roomOf(p);
     // 免除：餐厅（需房间功能未被黑客关闭，§6）/ 复活当轮
-    if (room === "B204" && isRoomFunctionAvailable("B204", draft)) {
+    if (room === "B204" && !isRoomFunctionDisabledForResolution("B204", draft)) {
       hostLogs.push(`${nm(p)} 在餐厅(B204) 免上交水粮。`);
       privateLogs.push({ playerId: p.id, text: "你在餐厅(B204) 本轮免上交水粮。" });
       continue;
@@ -388,9 +393,9 @@ function stepWaterFood(draft: GameRoom, round: number): ResolutionStep {
       continue;
     }
 
-    // §7.1：按「上一轮预交」的标记结算（本轮行动末尾的选择是为下一轮预交）。
-    const wantW = !!p.waterPledged;
-    const wantF = !!p.foodPledged;
+    // v1.0.4：水粮在结算阶段私密选择，并在本轮水粮步骤当场生效。
+    const wantW = !!p.submittedAction?.submitWater;
+    const wantF = !!p.submittedAction?.submitFood;
     const okW = wantW && removeOne(p, "water");
     const okF = wantF && removeOne(p, "food");
     if (okW) consume(draft, "water");
@@ -486,17 +491,24 @@ function stepItems(draft: GameRoom, round: number): ResolutionStep {
       privateLogs.push({ playerId: charity.id, text: "你的赠予失败：对方负重为 0 无法获得次元口袋。" });
       continue;
     }
-    if (!removeOne(charity, sk.giveItemId)) {
+    const giftIndex = sk.giveItemIndex;
+    const removedGift =
+      giftIndex !== undefined && charity.inventory[giftIndex] === sk.giveItemId
+        ? charity.inventory.splice(giftIndex, 1)[0]
+        : removeOne(charity, sk.giveItemId)
+          ? sk.giveItemId
+          : null;
+    if (!removedGift) {
       hostLogs.push(`慈善家 ${nm(charity)} 的赠予失败：未持有该道具。`);
       continue;
     }
-    target.inventory.push(sk.giveItemId); // 可短暂超过负重
+    target.inventory.push(removedGift); // 可短暂超过负重
     target.giftedDone = true;
     target.pendingGiftFrom = charity.id; // 挂起：由被赠予玩家自行选择转出哪项基因
-    // 赠予本身按规则为公开（不暴露位置）：公开仅说明发生了赠予，基因转移在对方选择后公开。
-    logs.push(`慈善家完成 1 次赠予：${nm(target)} 获得 1 张${getItemName(sk.giveItemId)}，须自行选择转移 1 点基因给 ${nm(charity)}。`);
-    privateLogs.push({ playerId: target.id, text: `你被慈善家(${nm(charity)}) 赠予 1 张${getItemName(sk.giveItemId)}，请在面板选择转移 1 点基因（武力/速度/负重，须 >0）给对方。` });
-    privateLogs.push({ playerId: charity.id, text: `你赠予 ${nm(target)} 1 张${getItemName(sk.giveItemId)}，等待对方选择转移 1 点基因。` });
+    hostLogs.push(`慈善家 ${nm(charity)} 赠予 ${nm(target)} 1 张${getItemName(removedGift)}。`);
+    logs.push(`慈善家向【${nm(target)}】赠予了 1 张道具。`);
+    privateLogs.push({ playerId: target.id, text: `你被慈善家(${nm(charity)}) 赠予 1 张${getItemName(removedGift)}，请在面板选择转移 1 点基因（武力/速度/负重，须 >0）给对方。` });
+    privateLogs.push({ playerId: charity.id, text: `你赠予 ${nm(target)} 1 张${getItemName(removedGift)}，等待对方选择转移 1 点基因。` });
   }
 
   // 职业待恢复生命（催眠师/预言家技能产生，规则 3.2）
@@ -690,6 +702,26 @@ export function buildResolutionPreview(room: GameRoom): ResolutionPreview {
   draft.resolutionPreview = null; // 避免嵌套
   return {
     round,
+    steps,
+    nextRoom: draft,
+    generatedAt: new Date().toISOString(),
+  };
+}
+
+/**
+ * 首轮出生战斗结算（v1.0.4）：只结算出生房间内的战斗 / 乱斗，然后做死亡 / 复活检查与最终生命值公开。
+ * 不触发移动、抽卡、房间功能、交易、毒气、水粮、职业主动技能、火箭筒或其他结算步骤。
+ */
+export function buildSpawnCombatPreview(room: GameRoom): ResolutionPreview {
+  const draft = clone(room);
+  const steps: ResolutionStep[] = [
+    stepCombat(draft, 0, false),
+    stepDeathRevive(draft, 0),
+    stepFinalHp(draft),
+  ];
+  draft.resolutionPreview = null;
+  return {
+    round: 0,
     steps,
     nextRoom: draft,
     generatedAt: new Date().toISOString(),

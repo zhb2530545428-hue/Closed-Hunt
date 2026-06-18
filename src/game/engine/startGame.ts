@@ -7,9 +7,7 @@ import { isGeneValid, resolveRoleAssignments } from "./lobby";
 import { getRole } from "../config/roles";
 import { ROOMS } from "../config/rooms";
 import { initialStockFor } from "../config/initialStocks";
-import { addAirdropForRound } from "./draw";
 import { applyRoleSetup } from "./roleEffects";
-import { assignOrderCards } from "./advancePhase";
 
 /** 已就座（有昵称）的玩家 */
 function seatedPlayers(room: GameRoom): Player[] {
@@ -43,7 +41,7 @@ export function canStartGame(room: GameRoom): { ok: boolean; reason?: string } {
 
 /**
  * 开始游戏：
- * 1. 校验；2. 初始化第 1 轮；3. 玩家位置=出生房间，生命=10；4. 进入 FREE 阶段。
+ * 1. 校验；2. 初始化玩家与库存；3. 进入首轮出生战斗结算；4. 确认后才进入正式第 1 轮。
  */
 export function startGame(room: GameRoom): GameRoom {
   const check = canStartGame(room);
@@ -82,15 +80,17 @@ export function startGame(room: GameRoom): GameRoom {
     roomInventories,
     consumedPile: {},
     airdrops: [],
-    status: "FREE",
-    currentRound: 1,
-    currentPhase: "FREE",
+    status: "SPAWN_COMBAT",
+    currentRound: 0,
+    currentPhase: "SPAWN_COMBAT",
     trades: [],
     closedRooms: [],
+    closedRoomRecords: [],
+    pendingHypnosis: [],
+    hypnosisDecisions: [],
+    settlementConfirmations: [],
     updatedAt: nowISO(),
   };
-  next = addAirdropForRound(next, 1);
-  next = assignOrderCards(next); // 第 1 轮自由阶段抽取顺位卡（规则 6.1）
 
   // 职业开局设置（富豪金条、驯兽师 +1、运行时字段初始化）。规则 3.2。
   const setup = applyRoleSetup(next);
@@ -103,6 +103,6 @@ export function startGame(room: GameRoom): GameRoom {
     .map((p) => `${p.name}=${getRole(p.roleId)?.name ?? "?"}`)
     .join("，");
   next = appendLog(next, `角色分配完成：${roster}。`);
-  next = appendLog(next, "游戏开始。首轮自由阶段开始。");
+  next = appendLog(next, "出生房间已确定，请房主执行首轮出生战斗结算。");
   return next;
 }

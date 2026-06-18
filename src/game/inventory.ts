@@ -126,7 +126,12 @@ function migrateInv(inv: Inventory | undefined): Inventory | undefined {
 export function migrateRoomItems(room: GameRoom): GameRoom {
   let changed = false;
   const probe = JSON.stringify(room);
-  if (!/"wine"|"alcohol"|"liquor"|"beer"|"酒"/.test(probe)) return room;
+  const needsItemMigration = /"wine"|"alcohol"|"liquor"|"beer"|"酒"/.test(probe);
+  const needsHypnosisMigration = !Array.isArray((room as GameRoom & { pendingHypnosis?: unknown }).pendingHypnosis);
+  const needsHypnosisDecisionMigration = !Array.isArray((room as GameRoom & { hypnosisDecisions?: unknown }).hypnosisDecisions);
+  const needsSettlementConfirmationMigration = !Array.isArray((room as GameRoom & { settlementConfirmations?: unknown }).settlementConfirmations);
+  const needsClosedRoomRecordMigration = !Array.isArray((room as GameRoom & { closedRoomRecords?: unknown }).closedRoomRecords);
+  if (!needsItemMigration && !needsHypnosisMigration && !needsHypnosisDecisionMigration && !needsSettlementConfirmationMigration && !needsClosedRoomRecordMigration) return room;
   changed = true;
   void changed;
 
@@ -155,5 +160,9 @@ export function migrateRoomItems(room: GameRoom): GameRoom {
     roomInventories,
     consumedPile: migrateInv(room.consumedPile) ?? {},
     airdrops,
+    pendingHypnosis: Array.isArray(room.pendingHypnosis) ? room.pendingHypnosis : [],
+    hypnosisDecisions: Array.isArray(room.hypnosisDecisions) ? room.hypnosisDecisions : [],
+    settlementConfirmations: Array.isArray(room.settlementConfirmations) ? room.settlementConfirmations : [],
+    closedRoomRecords: Array.isArray(room.closedRoomRecords) ? room.closedRoomRecords : [],
   };
 }

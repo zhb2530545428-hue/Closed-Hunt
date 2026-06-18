@@ -6,10 +6,25 @@ export type PlayerStatus = "alive" | "shadow";
 export type GamePhase =
   | "LOBBY"
   | "SETUP"
+  | "SPAWN_COMBAT"
   | "FREE"
   | "ACTION"
   | "RESOLUTION"
   | "GAME_OVER";
+
+export type LogPhase =
+  | "initial_spawn_resolution"
+  | "free_phase"
+  | "action_phase"
+  | "resolution_room"
+  | "resolution_combat"
+  | "resolution_shadow"
+  | "resolution_rocket"
+  | "resolution_gas"
+  | "resolution_supply"
+  | "resolution_item_status"
+  | "resolution_death_revival"
+  | "final";
 
 /** 道具堆 / 房间库存：itemId -> 数量 */
 export type Inventory = Record<string, number>;
@@ -52,6 +67,36 @@ export interface PlayerRoundAction {
   submittedAt: string;
 }
 
+export interface PendingHypnosis {
+  hypnotistPlayerId: string;
+  targetPlayerId: string;
+  forcedRoomId: string;
+  roundId: string;
+  status: "pending" | "failed" | "applied" | "expired";
+}
+
+export interface HypnosisDecision {
+  hypnotistPlayerId: string;
+  roundId: string;
+  status: "pending" | "skipped" | "used" | "failed";
+}
+
+export interface SettlementResourceConfirmation {
+  playerId: string;
+  roundKey: string;
+  hasConfirmableResources: boolean;
+  confirmed: boolean;
+}
+
+export interface ClosedRoomRecord {
+  roomId: string;
+  round: number;
+  closedByPlayerId: string;
+  /** 黑客关闭房间时的行动顺位；旧存档可能为空。 */
+  actionOrder?: number | null;
+  closedAt: string;
+}
+
 /** 职业主动技能声明（移动阶段提交，结算或落位时生效）。来源：规则手册 3.2。 */
 export interface RoleSkillInput {
   /** 技能类型：charm/forecast/chemist_minus/chemist_plus/gift/hound/hacker_close/hacker_func/track */
@@ -62,6 +107,8 @@ export interface RoleSkillInput {
   targetRoom?: string;
   /** 慈善家赠出的道具 id */
   giveItemId?: string;
+  /** 慈善家赠出的道具在当前手牌中的序号，用于按单张实例处理。 */
+  giveItemIndex?: number;
   /** 黑客三选一功能：gene/control/operate */
   funcChoice?: string;
   /** 饮品师果汁使用（单瓶兼容旧版）：可选的 3 个骰面（1-6），结算时在其中随机取 1 */
@@ -167,6 +214,8 @@ export interface GameLog {
    * - host：仅房主裁判视图可见（完整明细，如毒气票数）。
    */
   visibility: "public" | "private" | "host";
+  /** 用于公开日志分块展示；旧存档可为空，由 UI 回退到 phase。 */
+  logPhase?: LogPhase;
   playerId?: string;
   message: string;
   createdAt: string;
@@ -246,6 +295,14 @@ export interface GameRoom {
   clearedGasRooms: string[];
   /** 本轮被黑客关闭功能的房间 id 列表（不能触发房间效果/抽卡） */
   closedRooms: string[];
+  /** 本轮被黑客关闭房间的时点记录，用于区分行动即时效果与结算效果。 */
+  closedRoomRecords: ClosedRoomRecord[];
+  /** 本轮待执行的催眠强制移动状态。仅本轮有效，目标轮到自己时才应用。 */
+  pendingHypnosis: PendingHypnosis[];
+  /** 行动阶段开始前，催眠师是否已完成本轮技能询问。 */
+  hypnosisDecisions: HypnosisDecision[];
+  /** 结算阶段玩家资源 / 慈善家技能确认状态。 */
+  settlementConfirmations: SettlementResourceConfirmation[];
 
   /** 房间库存：roomId -> 库存 */
   roomInventories: Record<string, Inventory>;

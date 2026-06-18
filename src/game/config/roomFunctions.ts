@@ -2,6 +2,7 @@
 // v0.1 用于展示房间功能与抽卡上限；抽卡/库存结算留待 v0.2。
 
 import type { GameRoom } from "../types";
+import type { Player } from "../types";
 
 export interface RoomFunctionConfig {
   roomId: string;
@@ -50,13 +51,55 @@ export function isDrawRoom(roomId: string): boolean {
   return getDrawLimit(roomId) > 0;
 }
 
+const RESOLUTION_ROOM_FUNCTIONS = new Set(["B202", "B204"]);
+
+function closeRecordsFor(roomId: string, room: GameRoom) {
+  const records = room.closedRoomRecords ?? [];
+  if (records.length > 0) return records.filter((r) => r.roomId === roomId && r.round === room.currentRound);
+  return (room.closedRooms ?? []).includes(roomId)
+    ? [{ roomId, round: room.currentRound, closedByPlayerId: "", actionOrder: null, closedAt: "" }]
+    : [];
+}
+
+function actionOrderOf(playerOrOrder: Player | number | null | undefined): number | null {
+  if (typeof playerOrOrder === "number") return playerOrOrder;
+  return playerOrOrder?.orderCard ?? null;
+}
+
+export function isResolutionRoomFunction(roomId: string): boolean {
+  return RESOLUTION_ROOM_FUNCTIONS.has(roomId);
+}
+
 /**
- * 房间功能本轮是否可用（v1.0.3 §6 统一封装）。
- * 黑客关闭某房间后，本轮该房间不能抽卡、不能使用房间功能、不产生任何功能性收益
- * （含餐厅免水粮、手术室回血、各类抽卡、空投、基因库/控制室/操作室等）。
- * 所有房间功能 / 抽卡 / 免水粮 / 回血 / 空投 / 基因调整都必须经过本判断，避免各处零散判断漏掉。
- * 注意：经过型效果（102 激光室）不属于「房间功能」，不受关闭影响（规则 7.3）。
+ * 行动阶段即时房间效果：抽卡、基因库、控制室、操作室等。
+ * 黑客关闭只影响黑客行动之后才进入或使用该房间功能的玩家；不会回溯取消先行动者。
+ */
+export function isRoomFunctionDisabledForAction(
+  roomId: string,
+  room: GameRoom,
+  playerOrOrder?: Player | number | null
+): boolean {
+  const records = closeRecordsFor(roomId, room);
+  if (records.length === 0) return false;
+  const playerOrder = actionOrderOf(playerOrOrder);
+  return records.some((record) => {
+    if (record.actionOrder == null || playerOrder == null) return true;
+    return playerOrder > record.actionOrder;
+  });
+}
+
+/**
+ * 结算阶段房间效果：餐厅、手术室等。
+ * 只要该房间在本轮结算前被黑客关闭，结算时统一失效，不区分进入先后。
+ */
+export function isRoomFunctionDisabledForResolution(roomId: string, room: GameRoom): boolean {
+  return closeRecordsFor(roomId, room).length > 0;
+}
+
+/**
+ * 兼容旧调用：按结算阶段口径判断房间功能是否可用。
+ * 新代码应优先使用 isRoomFunctionDisabledForAction / isRoomFunctionDisabledForResolution。
  */
 export function isRoomFunctionAvailable(roomId: string, room: GameRoom): boolean {
-  return !(room.closedRooms ?? []).includes(roomId);
+  return !isRoomFunctionDisabledForResolution(roomId, room);
 }

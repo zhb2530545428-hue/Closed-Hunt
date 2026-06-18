@@ -24,6 +24,11 @@ import {
   reviseAction,
   skipDraw,
   chooseGiftGene,
+  chooseResolutionResources,
+  reallocateGenesAtOperationRoom,
+  submitHypnosisDecision,
+  aliveHypnotistsNeedingDecision,
+  playerNeedsSettlementConfirmation,
 } from "@/game/engine";
 import type { RoleSkillInput } from "@/game/types";
 import { getInventoryWeight, getCarryLimit, isOverweight } from "@/game/inventory";
@@ -31,10 +36,10 @@ import { buildMoveContext, getReachableRooms, validateMove, normalStepDistance, 
 import { getRole, roleMaxUses } from "@/game/config/roles";
 import { getItemName } from "@/game/config/items";
 import { getRoomLabel, getRoom, ROOMS } from "@/game/config/rooms";
-import { getRoomFunction, getDrawLimit, isDrawRoom, isRoomFunctionAvailable } from "@/game/config/roomFunctions";
+import { getRoomFunction, getDrawLimit, isDrawRoom, isRoomFunctionDisabledForAction } from "@/game/config/roomFunctions";
 import { FLOORS } from "@/game/config/floors";
 import { PHASE_INFO } from "@/game/config/phases";
-import { TOTAL_ROUNDS, formatRoundLabel } from "@/game/config/rounds";
+import { formatRoundLabel } from "@/game/config/rounds";
 import { roleWithNick } from "@/game/utils/names";
 
 const USABLE = ["pill", "juice", "adrenaline"];
@@ -115,6 +120,12 @@ function PrivatePanel({ room, me, run }: { room: GameRoom; me: Player; run: (fn:
   const limit = getCarryLimit(me);
   const over = isOverweight(me);
   const isAction = room.currentPhase === "ACTION";
+  const hypnosisPromptPlayers = aliveHypnotistsNeedingDecision(room);
+  const hypnosisPromptPending = hypnosisPromptPlayers.length > 0;
+  const myHypnosisPrompt = hypnosisPromptPlayers.some((p) => p.id === me.id);
+  const visibleHypnosis = isAction && currentTurnPlayerId(room) === me.id
+    ? (room.pendingHypnosis ?? []).find((h) => h.targetPlayerId === me.id && h.roundId === String(room.currentRound) && h.status === "pending")
+    : undefined;
 
   const counts: Record<string, number> = {};
   for (const id of me.inventory) counts[id] = (counts[id] ?? 0) + 1;
@@ -127,12 +138,12 @@ function PrivatePanel({ room, me, run }: { room: GameRoom; me: Player; run: (fn:
   const reachableIds = reachable.map((r) => r.roomId);
 
   const [toRoom, setToRoom] = useState("");
-  const selected = isAction ? toRoom : me.submittedAction?.toRoom;
+  const selected = isAction ? (visibleHypnosis?.forcedRoomId ?? toRoom) : me.submittedAction?.toRoom;
   const heliEligible = me.location === "202";
 
   // §7：是否轮到我行动。暗影无顺位卡，可在行动阶段自由行动直到「结束行动」。
   const turnId = currentTurnPlayerId(room);
-  const isMyTurn = !me.endedAction && (turnId === me.id || (me.status === "shadow" && isAction));
+  const isMyTurn = !hypnosisPromptPending && !me.endedAction && (turnId === me.id || (me.status === "shadow" && isAction));
   const turnPlayer = room.players.find((p) => p.id === turnId);
 
   return (
@@ -172,9 +183,9 @@ function PrivatePanel({ room, me, run }: { room: GameRoom; me: Player; run: (fn:
         </div>
       </Card>
 
-      {me.forcedRoom && isAction && (
+      {visibleHypnosis && (
         <div className="mb-4 text-sm text-purple-200 bg-purple-900/30 border border-purple-700 rounded p-2">
-          你被催眠：本轮必须前往 <span className="font-semibold">{getRoomLabel(me.forcedRoom)}</span>。
+          你被催眠：本轮必须前往 <span className="font-semibold">{getRoomLabel(visibleHypnosis.forcedRoomId)}</span>。
         </div>
       )}
 
@@ -183,6 +194,12 @@ function PrivatePanel({ room, me, run }: { room: GameRoom; me: Player; run: (fn:
       {me.pendingGiftFrom && <GiftGeneChoiceCard room={room} me={me} run={run} />}
 
       {room.currentPhase === "FREE" && <TradePanel room={room} me={me} run={run} />}
+
+      {myHypnosisPrompt && <HypnotistPromptPanel room={room} me={me} run={run} />}
+
+      {room.currentPhase === "RESOLUTION" && !isShadow && (
+        <ResolutionResourcePanel room={room} me={me} counts={counts} run={run} />
+      )}
 
       <Card title="地图与房间对照" className="mb-4">
         {isAction && (
@@ -193,8 +210,8 @@ function PrivatePanel({ room, me, run }: { room: GameRoom; me: Player; run: (fn:
         <GameMap
           selectedRoomId={selected}
           currentPlayerRoomId={me.location ?? undefined}
-          reachableRoomIds={isAction ? reachableIds : undefined}
-          onPickRoom={isAction ? setToRoom : undefined}
+          reachableRoomIds={isAction ? (visibleHypnosis ? [visibleHypnosis.forcedRoomId] : reachableIds) : undefined}
+          onPickRoom={isAction && !visibleHypnosis ? setToRoom : undefined}
           gasFloors={room.gasFloors}
           clearedGasRooms={room.clearedGasRooms}
           compact
@@ -210,6 +227,10 @@ function PrivatePanel({ room, me, run }: { room: GameRoom; me: Player; run: (fn:
             <Badge tone="toxic">已结束本轮行动</Badge>
             <p className="text-slate-400">本轮行动已锁定，不可更改。如需更正请房主在控制台重置你的提交。</p>
             {me.submittedAction && <p>目标房间：{getRoomLabel(me.submittedAction.toRoom)}</p>}
+          </div>
+        ) : hypnosisPromptPending ? (
+          <div className="text-sm text-purple-300">
+            行动阶段开始前，等待催眠师完成本轮技能选择。
           </div>
         ) : !isMyTurn ? (
           <div className="text-sm text-amber-300">
@@ -227,6 +248,7 @@ function PrivatePanel({ room, me, run }: { room: GameRoom; me: Player; run: (fn:
             reachableIds={reachableIds}
             toRoom={toRoom}
             setToRoom={setToRoom}
+            forcedRoomId={visibleHypnosis?.forcedRoomId}
           />
         )}
       </Card>
@@ -275,6 +297,7 @@ function ActionArea({
   reachableIds,
   toRoom,
   setToRoom,
+  forcedRoomId,
 }: {
   room: GameRoom;
   me: Player;
@@ -286,51 +309,30 @@ function ActionArea({
   reachableIds: string[];
   toRoom: string;
   setToRoom: (id: string) => void;
+  forcedRoomId?: string;
 }) {
   const submitted = me.submittedAction;
 
   const [gasVoteFloor, setGasVoteFloor] = useState(submitted?.gasVoteFloor ?? "");
   const [roomAction, setRoomAction] = useState(submitted?.roomAction ?? "");
   const [rocketTarget, setRocketTarget] = useState(submitted?.rocketTargetRoom ?? "");
-  const [submitWater, setSubmitWater] = useState(submitted?.submitWater ?? false);
-  const [submitFood, setSubmitFood] = useState(submitted?.submitFood ?? false);
-  const [useCounts, setUseCounts] = useState<Record<string, number>>(() => {
-    const init: Record<string, number> = {};
-    for (const id of submitted?.useItems ?? []) init[id] = (init[id] ?? 0) + 1;
-    return init;
-  });
   const [roleSkill, setRoleSkill] = useState<RoleSkillInput | undefined>(submitted?.roleSkill);
 
+  const effectiveToRoom = forcedRoomId ?? toRoom;
   const preview: MovePreview | null = useMemo(
-    () => (toRoom ? validateMove(buildMoveContext(me), toRoom) : null),
-    [toRoom, me]
+    () => (effectiveToRoom ? validateMove(buildMoveContext(me), effectiveToRoom) : null),
+    [effectiveToRoom, me]
   );
-  const destFn = toRoom ? getRoomFunction(toRoom) : undefined;
+  const destFn = effectiveToRoom ? getRoomFunction(effectiveToRoom) : undefined;
   const hasRocket = me.inventory.includes("rocket");
-  // §8：饮品师按瓶数分配目标，未为每瓶选择目标前不可确认。
-  const juiceUseCount = useCounts["juice"] ?? 0;
-  const juiceTargetsIncomplete =
-    me.roleId === "bartender" &&
-    juiceUseCount > 0 &&
-    roleSkill?.type === "juice" &&
-    (roleSkill.juiceAssignments ?? []).slice(0, juiceUseCount).some((a) => !a.targetPlayerId);
-
-  const buildUseItems = (): string[] => {
-    const list: string[] = [];
-    for (const [id, n] of Object.entries(useCounts)) for (let i = 0; i < n; i++) list.push(id);
-    return list;
-  };
 
   const doSubmit = () => {
     run((r) =>
       submitAction(r, me.id, {
-        toRoom,
+        toRoom: effectiveToRoom,
         gasVoteFloor: isShadow ? null : gasVoteFloor,
         roomAction: roomAction || undefined,
-        useItems: buildUseItems(),
         rocketTargetRoom: rocketTarget || undefined,
-        submitWater,
-        submitFood,
         roleSkill: isShadow ? undefined : roleSkill,
       })
     );
@@ -342,15 +344,12 @@ function ActionArea({
     rooms: reachable.filter((r) => getRoomFloor(r.roomId) === f.id),
   })).filter((g) => g.rooms.length > 0);
 
-  // §7.1：水粮为「预交下一轮」——最后一轮（第6轮）后无下一轮，故不再询问。
-  const showWaterFoodPrepay = !isShadow && room.currentRound < TOTAL_ROUNDS;
-  const nextRoundLabel = formatRoundLabel(room.currentRound + 1);
   const gasMissing = !isShadow && !gasVoteFloor;
 
   // §7.2：到达可抽卡房间必须先处理抽卡（抽卡或放弃）才能进入「结算准备区」。
   // 抽卡期间待上交的水粮 / 待使用的道具仍占负重，不能提前交出后再多抽——故按此顺序门控。
   const drawTarget = submitted?.toRoom;
-  const drawClosed = drawTarget ? !isRoomFunctionAvailable(drawTarget, room) : false;
+  const drawClosed = drawTarget ? isRoomFunctionDisabledForAction(drawTarget, room, me) : false;
   const drawStock = drawTarget
     ? Object.values(room.roomInventories[drawTarget] ?? {}).reduce((a, b) => a + b, 0)
     : 0;
@@ -363,24 +362,13 @@ function ActionArea({
     !submitted.hasDrawnFromRoom &&
     !submitted.drawSkipped;
 
-  // 行动末尾统一提交：道具使用 / 火箭筒 / 水粮预交 / 毒气投票 /（饮品师）果汁分配。
+  // 行动末尾统一提交：火箭筒 / 毒气投票。资源使用移到结算阶段。
   const revisePatch = () => ({
-    useItems: buildUseItems(),
     rocketTargetRoom: rocketTarget || undefined,
-    submitWater,
-    submitFood,
     gasVoteFloor: isShadow ? null : gasVoteFloor || null,
-    roleSkill: me.roleId === "bartender" ? roleSkill : undefined,
   });
 
-  // §7.2 行动 UI 顺序：① 身份（上方）② 位置/速度/可达 ③ 选择并确认移动
-  // ④ 抽卡 ⑤ 抽到结果 ⑥ 背包更新 ⑦~⑩ 下一轮准备（水/粮/药/果汁/肾上腺素，0 也显示禁用）
-  // ⑪ 毒气投票 ⑫ 黄色结束行动。各区块顺次向下出现，确认移动后不跳回顶部。
-  const usableLabel: Record<string, string> = {
-    pill: "药片（本轮结算回血）",
-    juice: "果汁（本轮结算掷骰）",
-    adrenaline: "肾上腺素（下一轮生效）",
-  };
+  // v1.0.4：行动阶段只处理移动、抽卡确认、火箭筒和毒气投票；资源使用入口在结算阶段。
 
   return (
     <div className="space-y-4">
@@ -392,6 +380,11 @@ function ActionArea({
               <p className="text-sm text-amber-300">没有可到达的房间（请检查速度或地图连接）。</p>
             ) : (
               <div className="space-y-2">
+                {forcedRoomId && (
+                  <div className="rounded border border-purple-700 bg-purple-900/20 p-2 text-xs text-purple-200">
+                    已锁定目标房间：{getRoomLabel(forcedRoomId)}。其他房间本轮不可选择。
+                  </div>
+                )}
                 {reachByFloor.map((g) => (
                   <div key={g.floor}>
                     <div className="text-[11px] text-slate-500 mb-1">{g.floor}</div>
@@ -400,10 +393,12 @@ function ActionArea({
                         <button
                           key={r.roomId}
                           type="button"
-                          onClick={() => { setToRoom(r.roomId); setRoomAction(""); }}
+                          disabled={!!forcedRoomId && r.roomId !== forcedRoomId}
+                          onClick={() => { if (!forcedRoomId) { setToRoom(r.roomId); setRoomAction(""); } }}
                           className={cls(
                             "text-xs px-2 py-1 rounded border",
-                            toRoom === r.roomId ? "bg-gold/30 border-gold text-gold" : "bg-ink-700 border-ink-600 hover:brightness-125"
+                            effectiveToRoom === r.roomId ? "bg-gold/30 border-gold text-gold" : "bg-ink-700 border-ink-600 hover:brightness-125",
+                            forcedRoomId && r.roomId !== forcedRoomId && "opacity-35 cursor-not-allowed"
                           )}
                         >
                           {getRoomLabel(r.roomId)}
@@ -435,24 +430,24 @@ function ActionArea({
             <Field label={`房间功能（${destFn.name}）`}>
               <select className="select" value={roomAction} onChange={(e) => setRoomAction(e.target.value)}>
                 <option value="">不使用</option>
-                {toRoom === "201" && <option value="gene">使用基因库：三项 +1</option>}
-                {toRoom === "B101" && <option value="control_vote10">控制室：本轮毒气投票 1 票视为 10 票</option>}
-                {toRoom !== "201" && toRoom !== "B101" && <option value="use">使用：{destFn.name}（结算时由房主核对）</option>}
+                {effectiveToRoom === "201" && <option value="gene">使用基因库：三项 +1</option>}
+                {effectiveToRoom === "B101" && <option value="control_vote10">控制室：本轮毒气投票 1 票视为 10 票</option>}
+                {effectiveToRoom !== "201" && effectiveToRoom !== "B101" && <option value="use">使用：{destFn.name}（结算时由房主核对）</option>}
               </select>
               <p className="text-[11px] text-slate-500 mt-1">{destFn.effect}</p>
             </Field>
           )}
 
-          {/* 移动阶段主动技能（化学家/催眠/预言/慈善/侦探/黑客/猎犬）。饮品师果汁分配在抽卡后的准备区。 */}
+          {/* 移动阶段主动技能（化学家/预言/侦探/黑客/猎犬）。催眠师在行动前询问；慈善家在结算确认面板处理。 */}
           {!isShadow && me.roleId !== "bartender" && (
-            <RoleSkillField room={room} me={me} value={roleSkill} onChange={setRoleSkill} counts={counts} juiceUseCount={0} />
+            <RoleSkillField room={room} me={me} value={roleSkill} onChange={setRoleSkill} counts={counts} juiceUseCount={0} trackBlocked={!!forcedRoomId} />
           )}
 
           {isShadow && (
             <p className="text-sm text-purple-300">暗影：不投毒气、不用房间功能、不抽道具，仅提交移动终点；可不经楼梯上下楼；经过激光室不受伤害。</p>
           )}
 
-          <Button variant="primary" className="w-full" disabled={!toRoom || over || (preview ? !preview.ok : false)} onClick={doSubmit}>
+          <Button variant="primary" className="w-full" disabled={!effectiveToRoom || over || (!forcedRoomId && (preview ? !preview.ok : false))} onClick={doSubmit}>
             确认移动并提交本轮行动
           </Button>
         </>
@@ -476,47 +471,12 @@ function ActionArea({
             <p className="text-sm text-purple-300">暗影：仅提交移动终点即可，无需抽卡/投票，等待房主结算或点「结束本轮行动」。</p>
           ) : mustHandleDraw ? (
             <p className="text-[11px] text-amber-300 border-t border-ink-600 pt-2">
-              请先在上方完成抽卡（抽卡或选择「放弃抽卡」）。抽卡期间待上交的水粮 / 待使用道具仍占负重，处理完抽卡后才会出现「结算准备区」与毒气投票。
+              请先在上方完成抽卡（抽卡或选择「放弃抽卡」）。处理完抽卡后才会出现毒气投票。
             </p>
           ) : (
             <>
               {/* 步骤 6：背包 / 负重在上方「本轮状态」卡实时更新 */}
-              <p className="text-[11px] text-slate-500 border-t border-ink-600 pt-2">背包 / 负重已在上方「本轮状态」卡更新。下面是结算准备区。</p>
-
-              {/* 步骤 7-10：下一轮准备区（按钮无论有无道具都显示，数量为 0 时禁用） */}
-              <Field label="结算准备：道具使用（药片/果汁本轮结算生效，肾上腺素下一轮生效）">
-                <div className="space-y-1">
-                  {USABLE.map((id) => {
-                    const have = counts[id] ?? 0;
-                    return (
-                      <div key={id} className="flex items-center gap-2 text-sm">
-                        <span className="w-44">{usableLabel[id]}（持有 {have}）</span>
-                        <input
-                          type="number"
-                          min={0}
-                          max={have}
-                          disabled={have === 0}
-                          className="w-20 bg-ink-700 border border-ink-600 rounded px-2 py-1 disabled:opacity-40"
-                          value={useCounts[id] ?? 0}
-                          onChange={(e) => setUseCounts((s) => ({ ...s, [id]: Math.max(0, Math.min(have, parseInt(e.target.value, 10) || 0)) }))}
-                        />
-                      </div>
-                    );
-                  })}
-                </div>
-              </Field>
-
-              {/* 饮品师果汁分配（按使用瓶数逐瓶选目标）；普通玩家果汁仅对自己 */}
-              {me.roleId === "bartender" ? (
-                <RoleSkillField room={room} me={me} value={roleSkill} onChange={setRoleSkill} counts={counts} juiceUseCount={useCounts["juice"] ?? 0} />
-              ) : (useCounts["juice"] ?? 0) > 0 && (
-                <Field label={`果汁目标（本轮使用 ${useCounts["juice"]} 瓶）`}>
-                  <select className="select" disabled value="self">
-                    <option value="self">对自己使用（普通玩家的果汁仅能对自己使用）</option>
-                  </select>
-                  <p className="text-[11px] text-slate-500 mt-1">结算阶段对自己逐瓶掷骰生效。</p>
-                </Field>
-              )}
+              <p className="text-[11px] text-slate-500 border-t border-ink-600 pt-2">背包 / 负重已更新。水、粮、药片、果汁、肾上腺素将在结算阶段私密选择。</p>
 
               {hasRocket && (
                 <Field label="火箭筒袭击目标房间（可选，本轮结算生效）">
@@ -528,21 +488,6 @@ function ActionArea({
                       </optgroup>
                     ))}
                   </select>
-                </Field>
-              )}
-
-              {showWaterFoodPrepay && (
-                <Field label={`是否为下一轮（${nextRoundLabel}）交水粮？（预交 1 水 + 1 粮食，缺则${nextRoundLabel}结算扣血）`}>
-                  <div className="flex gap-4 text-sm">
-                    <label className="flex items-center gap-1">
-                      <input type="checkbox" checked={submitWater} onChange={(e) => setSubmitWater(e.target.checked)} disabled={!counts["water"]} />
-                      交水（持有 {counts["water"] ?? 0}）
-                    </label>
-                    <label className="flex items-center gap-1">
-                      <input type="checkbox" checked={submitFood} onChange={(e) => setSubmitFood(e.target.checked)} disabled={!counts["food"]} />
-                      交粮食（持有 {counts["food"] ?? 0}）
-                    </label>
-                  </div>
                 </Field>
               )}
 
@@ -561,10 +506,9 @@ function ActionArea({
               <Button
                 variant="ghost"
                 className="w-full"
-                disabled={juiceTargetsIncomplete}
                 onClick={() => run((r) => reviseAction(r, me.id, revisePatch()))}
               >
-                保存本轮道具 / 水粮 / 毒气投票
+                保存本轮火箭筒 / 毒气投票
               </Button>
             </>
           )}
@@ -575,7 +519,7 @@ function ActionArea({
           <Button
             variant="gold"
             className="w-full"
-            disabled={over || gasMissing || juiceTargetsIncomplete || mustHandleDraw}
+            disabled={over || gasMissing || mustHandleDraw}
             onClick={() => run((r) => endTurn(isShadow ? r : reviseAction(r, me.id, revisePatch()), me.id))}
           >
             结束本轮行动（结束后不可更改，轮到下一顺位）
@@ -597,6 +541,221 @@ function roomsOfFloor(floorId: string): string[] {
   return ROOMS.filter((r) => r.floor === floorId).map((r) => r.id);
 }
 
+function ResolutionResourcePanel({
+  room,
+  me,
+  counts,
+  run,
+}: {
+  room: GameRoom;
+  me: Player;
+  counts: Record<string, number>;
+  run: (fn: (r: GameRoom) => GameRoom) => void;
+}) {
+  const submitted = me.submittedAction;
+  const needsConfirmation = playerNeedsSettlementConfirmation(room, me);
+  const confirmed = (room.settlementConfirmations ?? []).some(
+    (c) => c.roundKey === String(room.currentRound) && c.playerId === me.id && c.confirmed
+  );
+  if (!needsConfirmation) return null;
+  const initialUseCounts = () => {
+    const acc: Record<string, number> = {};
+    for (const id of submitted?.useItems ?? []) {
+      if (USABLE.includes(id)) acc[id] = Math.min((counts[id] ?? 0), (acc[id] ?? 0) + 1);
+    }
+    return acc;
+  };
+  const [useCounts, setUseCounts] = useState<Record<string, number>>(initialUseCounts);
+  const [submitWater, setSubmitWater] = useState(Boolean(submitted?.submitWater));
+  const [submitFood, setSubmitFood] = useState(Boolean(submitted?.submitFood));
+  const [roleSkill, setRoleSkill] = useState<RoleSkillInput | undefined>(
+    submitted?.roleSkill?.type === "juice" ? submitted.roleSkill : undefined
+  );
+  const existingGift = submitted?.roleSkill?.type === "gift" ? submitted.roleSkill : undefined;
+  const [useCharity, setUseCharity] = useState(Boolean(existingGift));
+  const [charityTarget, setCharityTarget] = useState(existingGift?.targetPlayerIds?.[0] ?? "");
+  const [giftPick, setGiftPick] = useState(
+    existingGift?.giveItemIndex !== undefined && existingGift.giveItemId
+      ? `${existingGift.giveItemIndex}:${existingGift.giveItemId}`
+      : ""
+  );
+  const [saved, setSaved] = useState(false);
+
+  const setUseCount = (id: string, n: number) => {
+    const max = counts[id] ?? 0;
+    const safe = Math.max(0, Math.min(max, Number.isFinite(n) ? Math.floor(n) : 0));
+    setSaved(false);
+    setUseCounts((prev) => ({ ...prev, [id]: safe }));
+  };
+  const buildUseItems = () => {
+    const items: string[] = [];
+    for (const id of USABLE) {
+      const n = Math.min(counts[id] ?? 0, useCounts[id] ?? 0);
+      for (let i = 0; i < n; i++) items.push(id);
+    }
+    return items;
+  };
+  const juiceUseCount = Math.min(counts.juice ?? 0, useCounts.juice ?? 0);
+  const charityTargets = room.players.filter((p) => p.name && p.status === "alive" && p.id !== me.id && !p.giftedDone);
+  const giftOptions = buildGiftOptions(me.inventory);
+  const charityIncomplete = useCharity && (!charityTarget || !giftPick);
+
+  const save = () => {
+    const [idxText, itemId] = giftPick.split(":");
+    const giftIndex = Number(idxText);
+    run((r) =>
+      chooseResolutionResources(r, me.id, {
+        useItems: buildUseItems(),
+        submitWater,
+        submitFood,
+        roleSkill: me.roleId === "bartender"
+          ? roleSkill
+          : me.roleId === "philanthropist" && useCharity
+            ? { type: "gift", targetPlayerIds: [charityTarget], giveItemId: itemId, giveItemIndex: giftIndex }
+            : undefined,
+      })
+    );
+    setSaved(true);
+  };
+
+  return (
+    <Card title="结算阶段资源选择（仅你可见）" className="mb-4 border-gold/30">
+      <p className="text-xs text-slate-400 mb-3">
+        水、粮食、药片、果汁、肾上腺素在这里选择；无论使用或不使用，都需要点击确认。
+      </p>
+      {confirmed && <p className="text-xs text-green-300 mb-3">你已确认本轮结算选择。</p>}
+      {room.resolutionPreview && <p className="text-xs text-amber-300 mb-3">如重新确认选择，房主需要重新生成结算预览。</p>}
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+        <label className={cls("flex items-center justify-between gap-2 bg-ink-700 border border-ink-600 rounded p-2", !counts.water && "opacity-50")}>
+          <span>交水 <span className="text-slate-500">持有 {counts.water ?? 0}</span></span>
+          <input
+            type="checkbox"
+            checked={submitWater}
+            disabled={!counts.water}
+            onChange={(e) => { setSaved(false); setSubmitWater(e.target.checked); }}
+          />
+        </label>
+        <label className={cls("flex items-center justify-between gap-2 bg-ink-700 border border-ink-600 rounded p-2", !counts.food && "opacity-50")}>
+          <span>交粮食 <span className="text-slate-500">持有 {counts.food ?? 0}</span></span>
+          <input
+            type="checkbox"
+            checked={submitFood}
+            disabled={!counts.food}
+            onChange={(e) => { setSaved(false); setSubmitFood(e.target.checked); }}
+          />
+        </label>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-3">
+        {USABLE.map((id) => (
+          <Field key={id} label={`${getItemName(id)}（持有 ${counts[id] ?? 0}）`}>
+            <input
+              className="select"
+              type="number"
+              min={0}
+              max={counts[id] ?? 0}
+              value={useCounts[id] ?? 0}
+              disabled={!(counts[id] ?? 0)}
+              onChange={(e) => setUseCount(id, Number(e.target.value))}
+            />
+          </Field>
+        ))}
+      </div>
+
+      {me.roleId === "bartender" && juiceUseCount > 0 && (
+        <div className="mt-3">
+          <RoleSkillField room={room} me={me} value={roleSkill} onChange={(v) => { setSaved(false); setRoleSkill(v); }} counts={counts} juiceUseCount={juiceUseCount} />
+        </div>
+      )}
+
+      {me.roleId === "philanthropist" && (
+        <div className="mt-3 border border-ink-600 rounded p-3">
+          <label className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={useCharity}
+              onChange={(e) => { setSaved(false); setUseCharity(e.target.checked); }}
+            />
+            慈善家技能：本轮赠出 1 张具体道具
+          </label>
+          {useCharity && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
+              <select className="select" value={charityTarget} onChange={(e) => { setSaved(false); setCharityTarget(e.target.value); }}>
+                <option value="">选择赠予对象…</option>
+                {charityTargets.map((p) => <option key={p.id} value={p.id}>{playerLabel(p)}</option>)}
+              </select>
+              <select className="select" value={giftPick} onChange={(e) => { setSaved(false); setGiftPick(e.target.value); }}>
+                <option value="">选择 1 张道具…</option>
+                {giftOptions.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
+              </select>
+              <p className="text-[11px] text-slate-500 sm:col-span-2">
+                这里只能选一张具体道具；被赠予者稍后在自己的面板选择转出 1 点基因。
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <Button variant="gold" disabled={charityIncomplete} onClick={save}>确认结算选择</Button>
+        {saved && <span className="text-xs text-green-300">已确认本轮结算选择。</span>}
+        {charityIncomplete && <span className="text-xs text-amber-300">慈善家若使用技能，必须选择对象和 1 张道具。</span>}
+      </div>
+    </Card>
+  );
+}
+
+function buildGiftOptions(inventory: string[]): Array<{ value: string; label: string }> {
+  const seen: Record<string, number> = {};
+  return inventory.map((id, index) => {
+    seen[id] = (seen[id] ?? 0) + 1;
+    return {
+      value: `${index}:${id}`,
+      label: `${getItemName(id)}（第 ${seen[id]} 张）`,
+    };
+  });
+}
+
+function HypnotistPromptPanel({ room, me, run }: { room: GameRoom; me: Player; run: (fn: (r: GameRoom) => GameRoom) => void }) {
+  const targets = room.players.filter((p) => p.name && p.status === "alive" && !p.charmedDone);
+  const [targetId, setTargetId] = useState(me.charmedDone ? "" : me.id);
+  const [targetRoom, setTargetRoom] = useState("");
+  const target = room.players.find((p) => p.id === targetId);
+  const dist = target?.location && targetRoom ? normalStepDistance(target.location, targetRoom) : null;
+  const canUse = !!targetId && !!targetRoom;
+  return (
+    <Card title="催眠师行动前选择" className="mb-4 border-purple-600/60">
+      <p className="text-xs text-slate-400 mb-3">
+        本轮行动开始前先决定是否使用催眠。可选择自己；成功后目标轮到行动时只能确认前往指定房间。
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        <select className="select" value={targetId} onChange={(e) => setTargetId(e.target.value)}>
+          <option value="">选择目标…</option>
+          {targets.map((p) => <option key={p.id} value={p.id}>{playerLabel(p)}{p.id === me.id ? "（自己）" : ""}</option>)}
+        </select>
+        <select className="select" value={targetRoom} onChange={(e) => setTargetRoom(e.target.value)}>
+          <option value="">指定目标房间…</option>
+          {ROOMS.map((r) => <option key={r.id} value={r.id}>{getRoomLabel(r.id)}</option>)}
+        </select>
+      </div>
+      {targetRoom && <p className="text-[11px] text-slate-500 mt-2">目标普通步数：{dist ?? "不可达"}（固定按 5 步判断，不看目标速度）。</p>}
+      <div className="flex flex-wrap gap-2 mt-3">
+        <Button variant="ghost" onClick={() => run((r) => submitHypnosisDecision(r, me.id, { use: false }))}>
+          本轮不使用
+        </Button>
+        <Button
+          variant="gold"
+          disabled={!canUse}
+          onClick={() => run((r) => submitHypnosisDecision(r, me.id, { use: true, targetPlayerId: targetId, targetRoom }))}
+        >
+          确认催眠选择
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
 function RoomInteractions({ room, me, run }: { room: GameRoom; me: Player; run: (fn: (r: GameRoom) => GameRoom) => void }) {
   const target = me.submittedAction!.toRoom;
   const fn = getRoomFunction(target);
@@ -604,9 +763,12 @@ function RoomInteractions({ room, me, run }: { room: GameRoom; me: Player; run: 
   const roomInv = room.roomInventories[target] ?? {};
   const invTotal = Object.values(roomInv).reduce((a, b) => a + b, 0);
   const [goldPick, setGoldPick] = useState("");
+  const [opForce, setOpForce] = useState(me.force);
+  const [opSpeed, setOpSpeed] = useState(me.speed);
+  const [opLoad, setOpLoad] = useState(me.load);
 
   // §6：房间被黑客关闭时本轮不能抽卡 / 不产生收益，进入者可私密获知。
-  const closed = !isRoomFunctionAvailable(target, room);
+  const closed = isRoomFunctionDisabledForAction(target, room, me);
   const canDraw = !closed && isDrawRoom(target) && target !== "B503";
   const isTrash = !closed && target === "B503";
   const canGold = !closed && me.inventory.includes("gold") && isDrawRoom(target) && target !== "B206" && target !== "B503";
@@ -672,6 +834,28 @@ function RoomInteractions({ room, me, run }: { room: GameRoom; me: Player; run: 
               ))}
             </div>
           )}
+        </div>
+      )}
+
+      {!closed && target === "B304" && (
+        <div className="border border-ink-600 rounded p-2">
+          <div className="text-xs text-slate-400 mb-2">操作室：重新分配自己的当前基因总和（速度最低 1）。</div>
+          <div className="flex flex-wrap items-center gap-1 text-xs">
+            武<input type="number" className="w-14 bg-ink-700 border border-ink-600 rounded px-1" min={0} value={opForce} onChange={(e) => setOpForce(Math.max(0, Number(e.target.value)))} />
+            速<input type="number" className="w-14 bg-ink-700 border border-ink-600 rounded px-1" min={1} value={opSpeed} onChange={(e) => setOpSpeed(Math.max(0, Number(e.target.value)))} />
+            负<input type="number" className="w-14 bg-ink-700 border border-ink-600 rounded px-1" min={0} value={opLoad} onChange={(e) => setOpLoad(Math.max(0, Number(e.target.value)))} />
+            <Button
+              variant="gold"
+              className="px-2 py-1 min-h-0"
+              disabled={opSpeed < 1 || opForce + opSpeed + opLoad !== me.force + me.speed + me.load}
+              onClick={() => run((r) => reallocateGenesAtOperationRoom(r, me.id, { force: opForce, speed: opSpeed, load: opLoad }))}
+            >
+              确认重分配
+            </Button>
+          </div>
+          <p className={cls("text-[11px] mt-1", opForce + opSpeed + opLoad === me.force + me.speed + me.load && opSpeed >= 1 ? "text-slate-500" : "text-amber-300")}>
+            当前总和 {opForce + opSpeed + opLoad} / 需要 {me.force + me.speed + me.load}；速度不能为 0。
+          </p>
         </div>
       )}
     </div>
@@ -845,11 +1029,12 @@ function TradePanel({ room, me, run }: { room: GameRoom; me: Player; run: (fn: (
 
 /** 行动阶段主动职业技能输入（化学家/催眠师/预言家/慈善家）。 */
 function RoleSkillField({
-  room, me, value, onChange, counts, juiceUseCount,
+  room, me, value, onChange, counts, juiceUseCount, trackBlocked = false,
 }: {
   room: GameRoom; me: Player; value: RoleSkillInput | undefined;
   onChange: (v: RoleSkillInput | undefined) => void; counts: Record<string, number>;
   juiceUseCount: number;
+  trackBlocked?: boolean;
 }) {
   const role = getRole(me.roleId);
   if (!role?.active) return null;
@@ -886,24 +1071,9 @@ function RoleSkillField({
 
   // 催眠师
   if (me.roleId === "hypnotist") {
-    const target = room.players.find((p) => p.id === value?.targetPlayerIds?.[0]);
-    const dist = target?.location && value?.targetRoom ? normalStepDistance(target.location, value.targetRoom) : null;
     return (
-      <Field label={`催眠师技能（剩 ${left} 次，可选）`}>
-        <p className="text-[11px] text-slate-500 mb-1">催眠目标本人在轮到其行动前不会知道；目标按 5 步内（无视其速度、不可用捷径）判定可达。</p>
-        <select className="select" value={value?.targetPlayerIds?.[0] ?? ""} onChange={(e) => onChange(e.target.value ? { type: "charm", targetPlayerIds: [e.target.value], targetRoom: value?.targetRoom } : undefined)}>
-          <option value="">不催眠</option>
-          {[me, ...others].filter((p) => !p.charmedDone).map((p) => <option key={p.id} value={p.id}>{playerLabel(p)}{p.id === me.id ? "（自己）" : ""}</option>)}
-        </select>
-        {value?.type === "charm" && (
-          <>
-            <select className="select mt-2" value={value.targetRoom ?? ""} onChange={(e) => onChange({ ...value, targetRoom: e.target.value })}>
-              <option value="">强制前往房间…</option>
-              {ROOMS.map((r) => <option key={r.id} value={r.id}>{getRoomLabel(r.id)}</option>)}
-            </select>
-            {value.targetRoom && <p className="text-[11px] text-slate-500 mt-1">目标普通步数：{dist ?? "不可达"}（需 ≤5）</p>}
-          </>
-        )}
+      <Field label={`催眠师技能（剩 ${left} 次）`}>
+        <p className="text-[11px] text-slate-500">催眠师技能在行动阶段开始前的专用询问中处理。</p>
       </Field>
     );
   }
@@ -932,18 +1102,8 @@ function RoleSkillField({
   // 慈善家
   if (me.roleId === "philanthropist") {
     return (
-      <Field label="慈善家·赠予（结算阶段，可选）">
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-          <select className="select" value={value?.targetPlayerIds?.[0] ?? ""} onChange={(e) => onChange(e.target.value ? { type: "gift", targetPlayerIds: [e.target.value], giveItemId: value?.giveItemId } : undefined)}>
-            <option value="">选择赠予对象…</option>
-            {others.filter((p) => !p.giftedDone).map((p) => <option key={p.id} value={p.id}>{playerLabel(p)}</option>)}
-          </select>
-          <select className="select" value={value?.giveItemId ?? ""} onChange={(e) => onChange({ type: "gift", targetPlayerIds: value?.targetPlayerIds ?? [], giveItemId: e.target.value })}>
-            <option value="">赠出道具…</option>
-            {Object.entries(counts).map(([id, n]) => <option key={id} value={id}>{getItemName(id)} ×{n}</option>)}
-          </select>
-        </div>
-        <p className="text-[11px] text-slate-500 mt-1">对方将公开转移其最高的 1 点非 0 基因给你。</p>
+      <Field label="慈善家·赠予">
+        <p className="text-[11px] text-slate-500">慈善家技能在结算阶段资源确认面板中处理。</p>
       </Field>
     );
   }
@@ -1010,7 +1170,7 @@ function RoleSkillField({
     );
     return (
       <Field label={`私家侦探·跟踪（剩 ${left} 次，可选）`}>
-        {me.forcedRoom ? <p className="text-[11px] text-purple-300">被催眠时无法跟踪。</p> : (
+        {trackBlocked ? <p className="text-[11px] text-purple-300">被催眠时无法跟踪。</p> : (
           <>
             <select className="select" value={value?.targetPlayerIds?.[0] ?? ""} onChange={(e) => onChange(e.target.value ? { type: "track", targetPlayerIds: [e.target.value] } : undefined)}>
               <option value="">不跟踪</option>
@@ -1125,6 +1285,7 @@ function HackerSkillField({
 function TurnOrderCard({ room, myId }: { room: GameRoom; myId?: string }) {
   const seated = room.players.filter((p) => p.name);
   const turnId = currentTurnPlayerId(room);
+  const hypnosisPromptPending = aliveHypnotistsNeedingDecision(room).length > 0;
   // 有顺位卡的存活玩家按顺位升序；暗影（无顺位卡）排在最后。
   const ordered = [...seated].sort((a, b) => {
     const oa = a.orderCard ?? 999;
@@ -1161,7 +1322,11 @@ function TurnOrderCard({ room, myId }: { room: GameRoom; myId?: string }) {
       </div>
       {isAction && (
         <p className="text-[11px] text-slate-500 mt-2">
-          {turnId ? `当前应由 ${playerLabel(seated.find((p) => p.id === turnId)!)} 行动。` : "存活玩家均已结束行动，等待房主进入结算。"}
+          {hypnosisPromptPending
+            ? "行动阶段开始前，等待催眠师完成技能选择。"
+            : turnId
+              ? `当前应由 ${playerLabel(seated.find((p) => p.id === turnId)!)} 行动。`
+              : "存活玩家均已结束行动，等待房主进入结算。"}
         </p>
       )}
     </Card>

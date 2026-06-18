@@ -4,7 +4,7 @@
 import type { GameRoom, Player } from "../types";
 import { appendPrivateLog, nowISO, shuffle } from "./helpers";
 import { invAdd, invRemove, invToList, canGainItem } from "../inventory";
-import { getDrawLimit, isRoomFunctionAvailable } from "../config/roomFunctions";
+import { getDrawLimit, isRoomFunctionDisabledForAction } from "../config/roomFunctions";
 import { isJunkItem, getItemName } from "../config/items";
 import { getRoomLabel } from "../config/rooms";
 import { airdropItemsByRound, displayRound, formatRoundLabel } from "../config/rounds";
@@ -52,7 +52,7 @@ function ensureCanDraw(room: GameRoom, roomId: string, playerId: string): Player
     throw new Error("请先提交本轮移动再使用房间功能。");
   }
   if (player.submittedAction.toRoom !== roomId) throw new Error("只能在你本轮的目标房间抽卡。");
-  if (!isRoomFunctionAvailable(roomId, room)) throw new Error("该房间功能被黑客关闭，本轮无法抽取道具。");
+  if (isRoomFunctionDisabledForAction(roomId, room, player)) throw new Error("该房间功能被黑客关闭，本轮无法抽取道具。");
   return player;
 }
 

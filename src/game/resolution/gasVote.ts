@@ -25,7 +25,7 @@ export function tallyGasVotes(players: Player[], existingGasFloors: string[]): G
     const vote = p.submittedAction?.gasVoteFloor;
     if (!vote) continue;
     if (existingGasFloors.includes(vote)) continue;
-    // 意见领袖 / 预言家额外票权、控制室 10 票（规则 3.2 / 14.1）
+    // 意见领袖额外票权、控制室 10 票（规则 3.2 / 14.1）
     const weight = gasVoteWeight(p, Math.max(0, seatedCount - 1));
     tally[vote] = (tally[vote] ?? 0) + weight;
   }

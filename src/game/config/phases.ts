@@ -19,6 +19,11 @@ export const PHASE_INFO: Record<GamePhase, PhaseInfo> = {
     label: "初始化",
     description: "游戏初始化中。",
   },
+  SPAWN_COMBAT: {
+    id: "SPAWN_COMBAT",
+    label: "首轮出生战斗结算",
+    description: "所有人出生房间已确定。此步骤只结算出生房间内的战斗或乱斗，不触发移动、抽卡、房间功能、交易、毒气、水粮、职业主动技能或火箭筒。",
+  },
   FREE: {
     id: "FREE",
     label: "自由阶段",

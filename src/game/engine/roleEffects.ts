@@ -3,13 +3,13 @@
 // （暗影使者、病毒携带者、入殓师、预言家、慈善家、化学家、催眠师）在 resolution/resolveRound.ts
 // 的对应步骤中调用本文件导出的辅助函数，保证规则不散落在 UI。
 
-import type { GameRoom, Inventory, Player } from "../types";
+import type { ClosedRoomRecord, GameRoom, HypnosisDecision, Inventory, Player } from "../types";
 import { invRemove, invToList, isOverweight, canGainItem } from "../inventory";
 import { roleMaxUses } from "../config/roles";
 import { isGunItem, getItemName } from "../config/items";
 import { getRoomLabel, ROOM_IDS } from "../config/rooms";
 import { normalStepDistance } from "../utils/movement";
-import { appendLog, nowISO } from "./helpers";
+import { appendLog, appendPrivateLog, nowISO } from "./helpers";
 import { roleName } from "../utils/names";
 
 const HOUND_MAX_STEPS = 5;
@@ -77,12 +77,12 @@ export function roleHasGun(p: Player): boolean {
 }
 
 /**
- * 毒气投票权重。意见领袖 / 预言家拥有额外 N×2 票（N=其他在座玩家数）。
+ * 毒气投票权重。意见领袖拥有额外 N×2 票（N=其他在座玩家数）。
  * 控制室「1 票视为 10 票」与额外票权不叠加，取较大值（边角情形，见 roles.ts 说明）。
  */
 export function gasVoteWeight(p: Player, otherSeatedCount: number): number {
   let base = 1;
-  if (p.roleId === "influencer" || p.roleId === "prophet") {
+  if (p.roleId === "influencer") {
     base = 1 + otherSeatedCount * 2;
   }
   const controlVote10 = p.submittedAction?.roomAction === "control_vote10";
@@ -97,6 +97,110 @@ function consumeRoleUse(p: Player, max: number): void {
 }
 
 const CHARM_MAX_STEPS = 5;
+
+export function hypnosisDecisionRoundKey(room: GameRoom): string {
+  return String(room.currentRound);
+}
+
+export function aliveHypnotistsNeedingDecision(room: GameRoom): Player[] {
+  if (room.currentPhase !== "ACTION" || room.currentRound <= 0) return [];
+  const key = hypnosisDecisionRoundKey(room);
+  return room.players.filter((p) => {
+    if (!p.name || p.status !== "alive" || p.roleId !== "hypnotist") return false;
+    if ((p.roleUses ?? 0) >= roleMaxUses("hypnotist")) return false;
+    const hasTarget = room.players.some((t) => t.name && t.status === "alive" && !t.charmedDone);
+    if (!hasTarget) return false;
+    const decision = (room.hypnosisDecisions ?? []).find((d) => d.roundId === key && d.hypnotistPlayerId === p.id);
+    return !decision || decision.status === "pending";
+  });
+}
+
+export function ensureHypnosisDecisions(room: GameRoom): GameRoom {
+  if (room.currentPhase !== "ACTION" || room.currentRound <= 0) return room;
+  const key = hypnosisDecisionRoundKey(room);
+  const existing = room.hypnosisDecisions ?? [];
+  const existingIds = new Set(existing.filter((d) => d.roundId === key).map((d) => d.hypnotistPlayerId));
+  const additions: HypnosisDecision[] = room.players
+    .filter((p) => {
+      if (!p.name || p.status !== "alive" || p.roleId !== "hypnotist") return false;
+      if ((p.roleUses ?? 0) >= roleMaxUses("hypnotist")) return false;
+      if (existingIds.has(p.id)) return false;
+      return room.players.some((t) => t.name && t.status === "alive" && !t.charmedDone);
+    })
+    .map((p) => ({ hypnotistPlayerId: p.id, roundId: key, status: "pending" }));
+  if (additions.length === 0) return { ...room, hypnosisDecisions: existing };
+  return { ...room, hypnosisDecisions: [...existing, ...additions], updatedAt: nowISO() };
+}
+
+export function submitHypnosisDecision(
+  room: GameRoom,
+  hypnotistId: string,
+  input:
+    | { use: false }
+    | { use: true; targetPlayerId: string; targetRoom: string }
+): GameRoom {
+  if (room.currentPhase !== "ACTION") throw new Error("仅能在行动阶段开始前处理催眠师技能。");
+  let next = ensureHypnosisDecisions(room);
+  const key = hypnosisDecisionRoundKey(next);
+  const decision = (next.hypnosisDecisions ?? []).find((d) => d.roundId === key && d.hypnotistPlayerId === hypnotistId);
+  if (!decision || decision.status !== "pending") throw new Error("本轮催眠师技能询问已处理。");
+
+  const players: Player[] = next.players.map((p) => ({ ...p }));
+  const hypnotist = players.find((p) => p.id === hypnotistId);
+  if (!hypnotist || hypnotist.status !== "alive" || hypnotist.roleId !== "hypnotist") {
+    throw new Error("只有存活催眠师可以处理该技能。");
+  }
+
+  if (!input.use) {
+    next = {
+      ...next,
+      players,
+      hypnosisDecisions: next.hypnosisDecisions.map((d) => (d === decision ? { ...d, status: "skipped" } : d)),
+      updatedAt: nowISO(),
+    };
+    return appendPrivateLog(next, hypnotistId, "你本轮选择不使用催眠。");
+  }
+
+  const target = players.find((p) => p.id === input.targetPlayerId);
+  if (!target) throw new Error("催眠目标不存在。");
+  if (target.status !== "alive") throw new Error("只能催眠存活玩家。");
+  if (target.charmedDone) throw new Error("该玩家本局已被催眠过。");
+  if (!ROOM_IDS.includes(input.targetRoom)) throw new Error("催眠目标房间非法。");
+
+  consumeRoleUse(hypnotist, roleMaxUses("hypnotist"));
+  const dist = normalStepDistance(target.location ?? "", input.targetRoom);
+  const success = dist !== null && dist <= CHARM_MAX_STEPS;
+  let pendingHypnosis = next.pendingHypnosis ?? [];
+  if (success) {
+    target.charmedDone = true;
+    target.roleHealPending = (target.roleHealPending ?? 0) + 1;
+    pendingHypnosis = [
+      ...pendingHypnosis.filter((h) => !(h.roundId === key && h.targetPlayerId === target.id && h.status === "pending")),
+      {
+        hypnotistPlayerId: hypnotist.id,
+        targetPlayerId: target.id,
+        forcedRoomId: input.targetRoom,
+        roundId: key,
+        status: "pending",
+      },
+    ];
+  }
+
+  next = {
+    ...next,
+    players,
+    pendingHypnosis,
+    hypnosisDecisions: next.hypnosisDecisions.map((d) => (d === decision ? { ...d, status: success ? "used" : "failed" } : d)),
+    updatedAt: nowISO(),
+  };
+  return appendPrivateLog(
+    next,
+    hypnotistId,
+    success
+      ? `催眠已确认。本轮目标行动时将被系统强制移动到 ${getRoomLabel(input.targetRoom)}。`
+      : `催眠失败：目标无法在 ${CHARM_MAX_STEPS} 步内到达 ${getRoomLabel(input.targetRoom)}。`
+  );
+}
 
 /** 黑客行动整局限次校验与登记。 */
 function consumeHackerAction(p: Player, kind: string): void {
@@ -125,8 +229,10 @@ export function applyDeclaredSkill(room: GameRoom, actorId: string): { room: Gam
   const logs: string[] = [];
   let clearedGasRooms = room.clearedGasRooms;
   let closedRooms = room.closedRooms;
+  let closedRoomRecords: ClosedRoomRecord[] = room.closedRoomRecords ?? [];
   let roomInventories = room.roomInventories;
   let airdrops = room.airdrops;
+  let pendingHypnosis = room.pendingHypnosis ?? [];
 
   if (skill.type === "charm") {
     if (actor.roleId !== "hypnotist") throw new Error("非催眠师不能催眠。");
@@ -142,10 +248,19 @@ export function applyDeclaredSkill(room: GameRoom, actorId: string): { room: Gam
       throw new Error(`目标 ${CHARM_MAX_STEPS} 步内无法到达该房间，催眠将失败，请改选。`);
     }
     consumeRoleUse(me, roleMaxUses("hypnotist"));
-    target.forcedRoom = room2;
     target.charmedDone = true;
-    me.roleHealPending = (me.roleHealPending ?? 0) + 1;
-    logs.push(`催眠师 ${me.name} 催眠了 ${target.name}，强制其本轮前往 ${getRoomLabel(room2)}。`);
+    target.roleHealPending = (target.roleHealPending ?? 0) + 1;
+    pendingHypnosis = [
+      ...pendingHypnosis.filter((h) => !(h.roundId === String(room.currentRound) && h.targetPlayerId === target.id && h.status === "pending")),
+      {
+        hypnotistPlayerId: me.id,
+        targetPlayerId: target.id,
+        forcedRoomId: room2,
+        roundId: String(room.currentRound),
+        status: "pending",
+      },
+    ];
+    logs.push(`催眠已提交。本轮目标行动时将被系统强制移动。`);
   } else if (skill.type === "forecast") {
     if (actor.roleId !== "prophet") throw new Error("非预言家不能做死亡预告。");
     const targets = (skill.targetPlayerIds ?? [])
@@ -163,6 +278,10 @@ export function applyDeclaredSkill(room: GameRoom, actorId: string): { room: Gam
     if (!r2 || !ROOM_IDS.includes(r2)) throw new Error("关闭目标房间非法。");
     consumeHackerAction(me, "close");
     if (!closedRooms.includes(r2)) closedRooms = [...closedRooms, r2];
+    closedRoomRecords = [
+      ...closedRoomRecords.filter((r) => !(r.round === room.currentRound && r.roomId === r2)),
+      { roomId: r2, round: room.currentRound, closedByPlayerId: me.id, actionOrder: me.orderCard, closedAt: nowISO() },
+    ];
     logs.push(`黑客 ${me.name} 秘密关闭了 ${getRoomLabel(r2)} 的功能（本轮进入者无法触发效果/抽卡）。`);
   } else if (skill.type === "hacker_func") {
     if (actor.roleId !== "hacker") throw new Error("非黑客不能远程执行房间功能。");
@@ -226,7 +345,7 @@ export function applyDeclaredSkill(room: GameRoom, actorId: string): { room: Gam
     }
   }
 
-  return { room: { ...room, players, clearedGasRooms, closedRooms, roomInventories, airdrops }, logs };
+  return { room: { ...room, players, clearedGasRooms, closedRooms, closedRoomRecords, roomInventories, airdrops, pendingHypnosis }, logs };
 }
 
 /** 猎犬随机抽取 1 张：返回抽中道具与更新后的库存/空投；无库存返回 null。 */

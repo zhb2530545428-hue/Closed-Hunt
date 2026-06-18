@@ -22,6 +22,7 @@ import {
 import { ROLES, getRole } from "@/game/config/roles";
 import { SPAWN_ROOMS } from "@/game/config/spawnRooms";
 import { getRoomLabel } from "@/game/config/rooms";
+import { formatRoundLabel } from "@/game/config/rounds";
 
 export default function LobbyPage() {
   const params = useParams<{ roomCode: string }>();
@@ -46,7 +47,7 @@ export default function LobbyPage() {
   if (room.currentPhase !== "LOBBY") {
     return (
       <main className="max-w-md mx-auto px-4 py-10 text-center space-y-4">
-        <p className="text-slate-300">游戏已开始（第 {room.currentRound} 轮）。</p>
+        <p className="text-slate-300">游戏已开始（{formatRoundLabel(room.currentRound)}）。</p>
         <div className="flex gap-2 justify-center">
           <Link href={`/room/${code}/play`}><Button variant="gold">进入我的面板</Button></Link>
           <Link href={`/room/${code}/board`}><Button variant="primary">公共战况</Button></Link>

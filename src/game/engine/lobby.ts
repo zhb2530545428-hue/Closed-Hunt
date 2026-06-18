@@ -172,14 +172,24 @@ export function toggleReady(room: GameRoom, playerId: string): GameRoom {
   return next;
 }
 
-/** 随机把 GENE_TOTAL 点分到三项（每项 ≥0，和为 10，速度至少 1）。v1.0.3 §5.1。 */
+const TEST_GENE_PRESETS: GeneAllocation[] = [
+  { force: 4, speed: 3, load: 3 },
+  { force: 3, speed: 4, load: 3 },
+  { force: 3, speed: 3, load: 4 },
+  { force: 5, speed: 3, load: 2 },
+  { force: 2, speed: 5, load: 3 },
+  { force: 3, speed: 2, load: 5 },
+  { force: 4, speed: 4, load: 2 },
+  { force: 2, speed: 4, load: 4 },
+];
+
+/** 本地热座测试基因：使用稳定模板，三项均 ≥2，合计 10，避免 0/10/0 等极端值。 */
 function randomGenes(): GeneAllocation {
-  // 速度 1..GENE_TOTAL，保证永不为 0；其余点随机分给武力 / 负重。
-  const speed = 1 + Math.floor(Math.random() * GENE_TOTAL);
-  const remaining = GENE_TOTAL - speed;
-  const force = Math.floor(Math.random() * (remaining + 1));
-  const load = remaining - force;
-  return { force, speed, load };
+  return { ...shuffle(TEST_GENE_PRESETS)[0] };
+}
+
+function isNonExtremeTestGene(g: GeneAllocation): boolean {
+  return isGeneValid(g) && g.force >= 1 && g.speed >= 1 && g.load >= 1 && Math.max(g.force, g.speed, g.load) <= 7;
 }
 
 /**
@@ -203,7 +213,7 @@ export function fillTestPlayers(room: GameRoom): GameRoom {
       preferredRoleId = rolePool[roleIdx] ?? ROLE_IDS[roleIdx % ROLE_IDS.length];
       roleIdx++;
     }
-    const geneOk = isGeneValid({ force: p.force, speed: p.speed, load: p.load });
+    const geneOk = isNonExtremeTestGene({ force: p.force, speed: p.speed, load: p.load });
     const genes = geneOk ? { force: p.force, speed: p.speed, load: p.load } : randomGenes();
     const location = p.location ?? shuffle(SPAWN_ROOMS)[0];
     return {

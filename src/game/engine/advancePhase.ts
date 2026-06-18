@@ -1,11 +1,13 @@
 // 阶段推进与结算应用。来源：规则手册 5-8、17；开发指令 7、8.6、3.5。
 
-import type { GamePhase, GameRoom, Player } from "../types";
+import type { GamePhase, GameRoom, LogPhase, Player } from "../types";
 import { TOTAL_ROUNDS, formatRoundLabel } from "../config/rounds";
 import { appendLog, appendHostLog, makeLog, nowISO, shuffle } from "./helpers";
 import { addAirdropForRound } from "./draw";
-import { isDrawRoom, isRoomFunctionAvailable } from "../config/roomFunctions";
-import { buildResolutionPreview, applyFinalGoldConversion } from "../resolution";
+import { isDrawRoom, isRoomFunctionDisabledForAction } from "../config/roomFunctions";
+import { buildResolutionPreview, buildSpawnCombatPreview, applyFinalGoldConversion } from "../resolution";
+import { ensureHypnosisDecisions, aliveHypnotistsNeedingDecision } from "./roleEffects";
+import { assertSettlementConfirmationsReady, refreshSettlementConfirmations } from "./settlementConfirmation";
 
 /** 为存活在座玩家随机生成顺位卡（规则 6.1，自由阶段抽取，可在自由阶段交易）。 */
 export function assignOrderCards(room: GameRoom): GameRoom {
@@ -26,6 +28,7 @@ function enterAction(room: GameRoom): GameRoom {
   // §7：每次进入行动阶段重置「已结束行动」标记，确保按顺位重新行动。
   const players = base.players.map((p) => ({ ...p, endedAction: false }));
   let next: GameRoom = { ...base, players, currentPhase: "ACTION", status: "ACTION", updatedAt: nowISO() };
+  next = ensureHypnosisDecisions(next);
   next = appendLog(next, `${formatRoundLabel(room.currentRound)}行动阶段开始，按顺位卡依次行动。`);
   return next;
 }
@@ -35,6 +38,7 @@ function enterAction(room: GameRoom): GameRoom {
  * 顺位卡数字最小者。全部结束行动或无人可行动时返回 null。
  */
 export function currentTurnPlayerId(room: GameRoom): string | null {
+  if (aliveHypnotistsNeedingDecision(room).length > 0) return null;
   const pending = room.players.filter(
     (p) => p.name && p.status === "alive" && p.orderCard != null && !p.endedAction
   );
@@ -66,7 +70,7 @@ export function endTurn(room: GameRoom, playerId: string): GameRoom {
   if (player.status === "alive" && player.submittedAction) {
     const a = player.submittedAction;
     const dest = a.toRoom;
-    const closed = !isRoomFunctionAvailable(dest, room);
+    const closed = isRoomFunctionDisabledForAction(dest, room, player);
     const stock = Object.values(room.roomInventories[dest] ?? {}).reduce((s, n) => s + n, 0);
     if (isDrawRoom(dest) && !closed && stock > 0 && !a.hasDrawnFromRoom && !a.drawSkipped) {
       throw new Error("你停留在可抽卡房间，请先抽卡或选择「放弃抽卡」再结束行动。");
@@ -81,7 +85,7 @@ export function endTurn(room: GameRoom, playerId: string): GameRoom {
 
 function enterFree(room: GameRoom): GameRoom {
   let next = assignOrderCards(room);
-  next = { ...next, currentPhase: "FREE", status: "FREE", trades: [], closedRooms: [], updatedAt: nowISO() };
+  next = { ...next, currentPhase: "FREE", status: "FREE", trades: [], closedRooms: [], closedRoomRecords: [], updatedAt: nowISO() };
   next = appendLog(next, `${formatRoundLabel(room.currentRound)}自由阶段开始，已抽取顺位卡，可在本阶段交易。`);
   return next;
 }
@@ -95,13 +99,14 @@ function enterResolution(room: GameRoom): GameRoom {
     resolutionPreview: null,
     updatedAt: nowISO(),
   };
+  next = refreshSettlementConfirmations(next);
   next = appendLog(next, `${formatRoundLabel(room.currentRound)}结算阶段开始。`);
   return next;
 }
 
 /** 房主显式切换阶段（同一轮内相邻切换） */
 export function goToPhase(room: GameRoom, target: GamePhase): GameRoom {
-  if (room.currentPhase === "LOBBY" || room.currentPhase === "GAME_OVER") {
+  if (room.currentPhase === "LOBBY" || room.currentPhase === "SPAWN_COMBAT" || room.currentPhase === "GAME_OVER") {
     throw new Error("当前阶段无法手动切换。");
   }
   switch (target) {
@@ -118,9 +123,12 @@ export function goToPhase(room: GameRoom, target: GamePhase): GameRoom {
 
 /** 生成结算预览（不修改真实状态，仅供房主核对）。开发指令 3.5.2。 */
 export function generateResolutionPreview(room: GameRoom): GameRoom {
-  if (room.currentPhase !== "RESOLUTION") throw new Error("仅能在结算阶段生成预览。");
-  const preview = buildResolutionPreview(room);
-  let next: GameRoom = { ...room, resolutionPreview: preview, updatedAt: nowISO() };
+  if (room.currentPhase !== "RESOLUTION" && room.currentPhase !== "SPAWN_COMBAT") {
+    throw new Error("仅能在结算阶段生成预览。");
+  }
+  const base = room.currentPhase === "RESOLUTION" ? refreshSettlementConfirmations(room) : room;
+  const preview = base.currentPhase === "SPAWN_COMBAT" ? buildSpawnCombatPreview(base) : buildResolutionPreview(base);
+  let next: GameRoom = { ...base, resolutionPreview: preview, updatedAt: nowISO() };
   next = appendLog(next, `房主生成了${formatRoundLabel(room.currentRound)}结算预览。`);
   return next;
 }
@@ -130,8 +138,9 @@ export function generateResolutionPreview(room: GameRoom): GameRoom {
  * 随后进入下一轮（或第 6 轮后进入最终结算）。开发指令 3.5.2 / 8.6。
  */
 export function confirmResolution(room: GameRoom): GameRoom {
-  if (room.currentPhase !== "RESOLUTION") throw new Error("当前不是结算阶段。");
+  if (room.currentPhase !== "RESOLUTION" && room.currentPhase !== "SPAWN_COMBAT") throw new Error("当前不是结算阶段。");
   if (!room.resolutionPreview) throw new Error("请先生成结算预览。");
+  assertSettlementConfirmationsReady(room);
 
   // 1. 应用预览得到的结算后状态
   const resolved: GameRoom = {
@@ -142,11 +151,25 @@ export function confirmResolution(room: GameRoom): GameRoom {
   // 追加每一步的日志，按可见性分发（§4 三层视图）：
   // logs → 公开；hostLogs → 房主裁判；privateLogs → 对应玩家私密。
   const logs = room.resolutionPreview.steps.flatMap((s) => [
-    ...s.logs.map((m) => makeLog(resolved, `[${s.title}] ${m}`, "public")),
-    ...(s.hostLogs ?? []).map((m) => makeLog(resolved, `[${s.title}] ${m}`, "host")),
-    ...(s.privateLogs ?? []).map((pl) => makeLog(resolved, `[${s.title}] ${pl.text}`, "private", pl.playerId)),
+    ...s.logs.map((m) => makeLog(resolved, `[${s.title}] ${m}`, "public", undefined, logPhaseForStep(s.type, room.currentPhase))),
+    ...(s.hostLogs ?? []).map((m) => makeLog(resolved, `[${s.title}] ${m}`, "host", undefined, logPhaseForStep(s.type, room.currentPhase))),
+    ...(s.privateLogs ?? []).map((pl) => makeLog(resolved, `[${s.title}] ${pl.text}`, "private", pl.playerId, logPhaseForStep(s.type, room.currentPhase))),
   ]);
   let applied: GameRoom = { ...resolved, publicLogs: [...resolved.publicLogs, ...logs] };
+
+  if (room.currentPhase === "SPAWN_COMBAT") {
+    const seated = applied.players.filter((p) => p.name);
+    const aliveCount = seated.filter((p) => p.status === "alive").length;
+    if (aliveCount <= 1) {
+      const winner = seated.find((p) => p.status === "alive");
+      applied = appendLog(
+        applied,
+        winner ? `仅剩 1 名存活玩家 ${winner.name}，立即获胜，游戏结束。` : "所有玩家均已成为暗影，游戏结束。"
+      );
+      return finalize(applied);
+    }
+    return advanceToFirstRound(applied);
+  }
 
   // 2. 提前结束判定（规则 17.1 / 17.4）
   const seated = applied.players.filter((p) => p.name);
@@ -187,9 +210,8 @@ function advanceToNextRound(room: GameRoom): GameRoom {
     if (!p.name) return p;
     // 每轮重置职业的本轮临时状态（被催眠强制房间、死亡预告标记）与行动锁
     const np: Player = { ...p, lastRoundHp: p.hp, orderCard: null, forcedRoom: null, forecastedBy: [], endedAction: false };
-    // §7.1 水粮预交结转：本轮行动末尾对「下一轮」的预交选择，结转为新一轮结算时的待上交标记。
-    np.waterPledged = !!p.submittedAction?.submitWater;
-    np.foodPledged = !!p.submittedAction?.submitFood;
+    np.waterPledged = false;
+    np.foodPledged = false;
 
     // 复活生效（规则 13.5/13.6）
     if (np.reviveNextRound && np.lastDrainRoomId) {
@@ -233,6 +255,10 @@ function advanceToNextRound(room: GameRoom): GameRoom {
     status: "FREE",
     trades: [], // 新一轮清空上一轮交易
     closedRooms: [], // 黑客关闭的房间仅持续本轮
+    closedRoomRecords: [],
+    pendingHypnosis: [],
+    hypnosisDecisions: [],
+    settlementConfirmations: [],
     updatedAt: nowISO(),
   };
   next = assignOrderCards(next); // 自由阶段抽取顺位卡（规则 6.1）
@@ -241,9 +267,61 @@ function advanceToNextRound(room: GameRoom): GameRoom {
   return next;
 }
 
+/** 首轮出生战斗结束后进入正式第 1 轮自由阶段。 */
+function advanceToFirstRound(room: GameRoom): GameRoom {
+  const players: Player[] = room.players.map((p) => {
+    if (!p.name) return p;
+    return {
+      ...p,
+      lastRoundHp: p.hp,
+      orderCard: null,
+      forcedRoom: null,
+      forecastedBy: [],
+      endedAction: false,
+      submittedAction: null,
+      waterPledged: false,
+      foodPledged: false,
+    };
+  });
+  let next: GameRoom = {
+    ...room,
+    players,
+    currentRound: 1,
+    currentPhase: "FREE",
+    status: "FREE",
+    trades: [],
+    closedRooms: [],
+    closedRoomRecords: [],
+    pendingHypnosis: [],
+    hypnosisDecisions: [],
+    settlementConfirmations: [],
+    updatedAt: nowISO(),
+  };
+  next = assignOrderCards(next);
+  next = addAirdropForRound(next, 1);
+  next = appendLog(next, "首轮结算完成，进入第 1 轮自由阶段，已抽取顺位卡。");
+  return next;
+}
+
 /** 结束游戏（房主强制） */
 export function endGame(room: GameRoom): GameRoom {
   let next: GameRoom = { ...room, currentPhase: "GAME_OVER", status: "GAME_OVER", updatedAt: nowISO() };
   next = appendLog(next, "房主结束了游戏。");
   return next;
+}
+
+function logPhaseForStep(stepType: string, phase: GamePhase): LogPhase {
+  if (phase === "SPAWN_COMBAT") return "initial_spawn_resolution";
+  const map: Record<string, LogPhase> = {
+    roomEffects: "resolution_room",
+    combat: "resolution_combat",
+    shadow: "resolution_shadow",
+    rocket: "resolution_rocket",
+    gas: "resolution_gas",
+    foodWater: "resolution_supply",
+    itemStatus: "resolution_item_status",
+    deathRevive: "resolution_death_revival",
+    finalHp: "final",
+  };
+  return map[stepType] ?? "resolution_item_status";
 }

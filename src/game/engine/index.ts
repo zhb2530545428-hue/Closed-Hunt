@@ -9,6 +9,7 @@ export * from "./advancePhase";
 export * from "./host";
 export * from "./roleEffects";
 export * from "./trade";
+export * from "./settlementConfirmation";
 
 // 结算引擎（含排名）
 export * from "../resolution";
