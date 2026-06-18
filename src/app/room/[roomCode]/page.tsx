@@ -161,15 +161,15 @@ export default function LobbyPage() {
             你不是房主。仅房主（{room.players.find((p) => p.id === room.hostPlayerId)?.name}）可开始游戏。
           </p>
         )}
-        {/* §8：本地热座 / 房主调试专用——随机生成测试玩家，不对正式线上普通玩家开放。 */}
-        {!remote && isHost && (
+        {/* §8：房主调试专用——仅开发调试模式开放，线上正式局不显示。 */}
+        {isHost && room.devMode && (
           <div className="mb-3">
             <div className="flex flex-wrap gap-2">
               <Button variant="ghost" onClick={() => run((r) => addRandomTestPlayer(r))} disabled={room.players.every((p) => !!p.name)}>
-                随机生成 1 名玩家（本地测试）
+                随机生成 1 名玩家（调试）
               </Button>
               <Button variant="ghost" onClick={() => run((r) => fillTestPlayers(r))}>
-                一键生成 9 名玩家（本地测试）
+                一键生成 9 名玩家（调试）
               </Button>
             </div>
             <p className="text-[11px] text-slate-500 mt-1">
